@@ -155,3 +155,65 @@ test("prices cache reads from either token price spelling", async () => {
     await server.stop(true)
   }
 })
+
+test("uses native Responses only for models advertising WebSocket support", async () => {
+  const items = [
+    { id: "gpt-6-luna", supported_endpoints: ["/responses", "ws:/responses"] },
+    { id: "gpt-6.1-sol", supported_endpoints: ["ws:/responses"] },
+    { id: "gpt-http", supported_endpoints: ["/responses"] },
+    { id: "chat-only", supported_endpoints: ["/chat/completions"] },
+    { id: "claude-sonnet", supported_endpoints: ["/v1/messages", "/chat/completions"] },
+    { id: "claude-messages", supported_endpoints: ["/v1/messages", "ws:/responses"] },
+  ]
+  const server = Bun.serve({
+    port: 0,
+    fetch: () =>
+      Response.json({
+        data: items.map((item) => ({
+          ...item,
+          model_picker_enabled: true,
+          name: item.id,
+          version: "2026-10-01",
+          capabilities: {
+            family: item.id.startsWith("claude") ? "claude" : "gpt",
+            limits: { max_output_tokens: 16384, max_prompt_tokens: 180000 },
+            supports: { tool_calls: true, reasoning_effort: ["low", "high"] },
+          },
+        })),
+      }),
+  })
+
+  try {
+    const alias = Model.Info.make({
+      ...Model.Info.default(Provider.ID.githubCopilot, Model.ID.make("my-luna")),
+      modelID: Model.ID.make("gpt-6-luna"),
+      name: "My Luna",
+      headers: { "x-custom": "preserved" },
+      settings: { reasoningSummary: "detailed" },
+    })
+    const models = await CopilotModels.get(server.url.origin, {}, [alias])
+    for (const id of ["gpt-6-luna", "gpt-6.1-sol", "my-luna"]) {
+      expect(models.get(Model.ID.make(id))).toMatchObject({
+        package: "@opencode/ai/providers/github-copilot",
+        settings: { baseURL: server.url.origin, endpoint: "responses" },
+      })
+    }
+    expect(models.get(alias.id)).toMatchObject({
+      modelID: "gpt-6-luna",
+      name: "My Luna",
+      headers: { "x-custom": "preserved" },
+      settings: { reasoningSummary: "detailed" },
+    })
+    for (const id of ["gpt-http", "chat-only"]) {
+      expect(models.get(Model.ID.make(id))?.package).toBe(Provider.aisdk("@ai-sdk/github-copilot"))
+    }
+    for (const id of ["claude-sonnet", "claude-messages"]) {
+      expect(models.get(Model.ID.make(id))).toMatchObject({
+        package: "@opencode/ai/providers/anthropic",
+        settings: { baseURL: `${server.url.origin}/v1`, endpoint: "messages" },
+      })
+    }
+  } finally {
+    await server.stop(true)
+  }
+})

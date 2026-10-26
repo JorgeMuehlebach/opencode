@@ -217,9 +217,14 @@ export const GithubCopilotPlugin = define({
     yield* ctx.provider.transform((evt) => {
       const item = evt.get(Provider.ID.githubCopilot)
       if (!item) return
+      // Only models advertising ws:/responses have a channel; the other Copilot APIs stay on HTTP.
+      const settings = Provider.mergeOverlay({ transport: "websocket" }, item.provider.settings)
+      evt.update(item.provider.id, (provider) => {
+        provider.settings = settings
+      })
       if (loaded.models) {
         evt.add({
-          info: item.provider,
+          info: { ...item.provider, settings },
           models: Array.from(
             CopilotModels.derive(loaded.baseURL ?? baseURL(), loaded.models, Array.from(item.models.values())).values(),
           ),

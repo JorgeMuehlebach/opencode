@@ -1,7 +1,7 @@
 import { Effect, Schema, Stream } from "effect"
 import { Headers } from "effect/http"
 import { Framing } from "../route/framing.js"
-import type { AIError, HttpContext } from "../schema/index.js"
+import type { AIError, HttpContext, LLMRequest } from "../schema/index.js"
 import {
   HttpTransport,
   WebSocketTransport,
@@ -28,6 +28,8 @@ export interface Options {
   readonly enabled?: (url: string) => boolean
   readonly url?: (url: string) => string
   readonly headers?: (headers: Headers.Headers) => Headers.Headers
+  /** Adds provider envelope fields after continuation comparison and checkpoint shaping. */
+  readonly message?: (request: Readonly<Record<string, unknown>>, llm: LLMRequest) => Readonly<Record<string, unknown>>
   readonly continuation?: OpenResponsesContinuation.Shape
 }
 
@@ -145,6 +147,7 @@ const driver = (options: Options, body: string): OpenResponsesContinuation.BaseD
 
 export const transport = <Body>(options: Options): Transport<Body, Prepared, string> => {
   const http = HttpTransport.sseJson.with<Body>()
+  const transform = options.message
   return {
     id: http.id,
     prepare: (input) =>
@@ -165,6 +168,7 @@ export const transport = <Body>(options: Options): Transport<Body, Prepared, str
                     name: options.name,
                     request: create.request,
                     message: create.message,
+                    transform: transform ? (request) => transform(request, input.request) : undefined,
                     base,
                     continuation: options.continuation,
                   }),
