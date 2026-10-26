@@ -61,6 +61,7 @@
     "./providers/elevenlabs": "./src/providers/elevenlabs.ts",
     "./providers/fal": "./src/providers/fal.ts",
     "./providers/fireworks": "./src/providers/fireworks.ts",
+    "./providers/github-copilot": "./src/providers/github-copilot.ts",
     "./providers/google": "./src/providers/google.ts",
     "./providers/google-vertex": "./src/providers/google-vertex.ts",
     "./providers/google-vertex-chat": "./src/providers/google-vertex-chat.ts",

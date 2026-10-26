@@ -108,7 +108,7 @@ jobs:
           for target in $TARGETS; do
             bundle="${target/opencode-/cli-}"
             outdir="dist/github/$target"
-            bun run build --target="$target" --outdir="$outdir" --skip-install
+            OPENCODE_TARGET="${target#opencode-}" bun run build --outdir="$outdir" --skip-install
             executable=opencode
             if [[ "$target" = *windows* ]]; then executable=opencode.exe; fi
             "$outdir/$bundle/bin/$executable" --version
