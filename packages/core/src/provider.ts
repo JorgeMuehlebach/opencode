@@ -80,6 +80,7 @@ const builtins = new Map<string, () => Promise<unknown>>([
   ["@opencode/ai/providers/deepseek", () => import("@opencode/ai/providers/deepseek")],
   ["@opencode/ai/providers/digitalocean", () => import("@opencode/ai/providers/digitalocean")],
   ["@opencode/ai/providers/fireworks", () => import("@opencode/ai/providers/fireworks")],
+  ["@opencode/ai/providers/github-copilot", () => import("@opencode/ai/providers/github-copilot")],
   ["@opencode/ai/providers/google", () => import("@opencode/ai/providers/google")],
   ["@opencode/ai/providers/google/interactions", () => import("@opencode/ai/providers/google/interactions")],
   ["@opencode/ai/providers/google-vertex", () => import("@opencode/ai/providers/google-vertex")],

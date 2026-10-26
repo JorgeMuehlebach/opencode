@@ -58,6 +58,33 @@ const modelRequest = Effect.fn(function* (sessionID: Session.ID, kind: SessionRe
 })
 
 describe("GithubCopilotPlugin", () => {
+  it.effect("defaults to WebSockets", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      yield* providers.transform((editor) => {
+        editor.update(Provider.ID.githubCopilot, (provider) => {
+          provider.activation = "enabled"
+        })
+      })
+      yield* addPlugin()
+      expect((yield* providers.get(Provider.ID.githubCopilot))?.settings?.transport).toBe("websocket")
+    }),
+  )
+
+  it.effect("preserves an explicit HTTP policy", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      yield* providers.transform((editor) => {
+        editor.update(Provider.ID.githubCopilot, (provider) => {
+          provider.activation = "enabled"
+          provider.settings = { ...provider.settings, transport: "http" }
+        })
+      })
+      yield* addPlugin()
+      expect((yield* providers.get(Provider.ID.githubCopilot))?.settings?.transport).toBe("http")
+    }),
+  )
+
   test("prefers the account-specific Copilot API endpoint", () => {
     expect(
       copilotBaseURL({

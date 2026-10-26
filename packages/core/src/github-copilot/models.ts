@@ -128,9 +128,10 @@ function usable(model: RemoteModel): model is UsableModel {
 
 function build(id: Model.ID, remote: UsableModel, baseURL: string, previous?: Model.Info) {
   const messages = remote.supported_endpoints?.includes("/v1/messages") ?? false
+  const webSocket = !messages && (remote.supported_endpoints?.includes("ws:/responses") ?? false)
   const endpoint = messages
     ? "messages"
-    : remote.supported_endpoints?.includes("/responses")
+    : webSocket || remote.supported_endpoints?.includes("/responses")
       ? "responses"
       : remote.supported_endpoints?.includes("/chat/completions")
         ? "chat"
@@ -159,7 +160,11 @@ function build(id: Model.ID, remote: UsableModel, baseURL: string, previous?: Mo
     providerID: Provider.ID.githubCopilot,
     family: previous?.family ?? Model.Family.make(remote.capabilities.family),
     name: previous?.name ?? remote.name,
-    package: messages ? "@opencode/ai/providers/anthropic" : Provider.aisdk("@ai-sdk/github-copilot"),
+    package: messages
+      ? "@opencode/ai/providers/anthropic"
+      : webSocket
+        ? "@opencode/ai/providers/github-copilot"
+        : Provider.aisdk("@ai-sdk/github-copilot"),
     settings: Provider.mergeOverlay(previous?.settings, {
       baseURL: messages ? `${baseURL}/v1` : baseURL,
       ...(endpoint ? { endpoint } : {}),

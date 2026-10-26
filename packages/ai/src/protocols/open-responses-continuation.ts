@@ -38,6 +38,7 @@ export interface DriverInput {
   readonly name: string
   readonly request: Readonly<Record<string, unknown>>
   readonly message: string
+  readonly transform?: (request: Readonly<Record<string, unknown>>) => Readonly<Record<string, unknown>>
   readonly base: BaseDriver
   readonly continuation?: Shape
 }
@@ -95,7 +96,9 @@ const comparable = (value: unknown) => {
   if (value.type === "reasoning")
     return {
       type: value.type,
-      summary: value.summary,
+      // Encrypted state is canonical; gateways may omit its display summaries on replay.
+      summary:
+        typeof value.encrypted_content === "string" && value.encrypted_content.length > 0 ? undefined : value.summary,
       encrypted_content: value.encrypted_content,
     }
   return value
@@ -148,18 +151,21 @@ export const driver = (input: DriverInput): WebSocketChannelDriver => {
   const { previous_response_id: _previousResponseID, ...request } = input.request
   const shape = input.continuation ?? ((fields: Readonly<Record<string, unknown>>) => fields)
   let output: OpenResponses.StreamItem[] = []
+  let indexedOutput: Record<number, OpenResponses.StreamItem> = {}
   return {
     create: (checkpoint) =>
       Effect.sync(() => {
         output = []
+        indexedOutput = {}
         const previous = checkpointValue(checkpoint)
         // Ask the route first: diffing the whole history is wasted when it declines the continuation.
         const fields = previous ? shape(request) : undefined
         const delta = previous && fields ? incremental(request, previous) : undefined
         if (!previous || !fields || !delta)
-          return { message: ProviderShared.encodeJson(request), mode: "full" as const }
+          return { message: ProviderShared.encodeJson(input.transform?.(request) ?? request), mode: "full" as const }
+        const next = { ...fields, input: delta, previous_response_id: previous.responseID }
         return {
-          message: ProviderShared.encodeJson({ ...fields, input: delta, previous_response_id: previous.responseID }),
+          message: ProviderShared.encodeJson(input.transform?.(next) ?? next),
           mode: "incremental" as const,
         }
       }),
@@ -173,7 +179,10 @@ export const driver = (input: DriverInput): WebSocketChannelDriver => {
         const observation = yield* input.base.observeEvent
           ? input.base.observeEvent(create, frame, event)
           : input.base.observe(create, frame)
-        if (event.type === "response.output_item.done" && event.item) output.push(event.item)
+        if (event.type === "response.output_item.done" && event.item) {
+          output.push(event.item)
+          if (event.output_index !== undefined) indexedOutput[event.output_index] = event.item
+        }
         if (observation.type === "provider-failure") {
           const rejection = code(event)
           if (rejection === "previous_response_not_found") return rejected(observation, "retry-full")
@@ -207,11 +216,15 @@ export const driver = (input: DriverInput): WebSocketChannelDriver => {
               request,
               // Completion can re-encrypt reasoning. Callers replay the item already emitted by output_item.done.
               output: event.response?.output?.length
-                ? event.response.output.map((item) =>
-                    item.type === "reasoning" && item.id !== undefined
-                      ? (output.find((done) => done.type === item.type && done.id === item.id) ?? item)
-                      : item,
-                  )
+                ? event.response.output.map((item, index) => {
+                    if (item.type !== "reasoning") return item
+                    const done =
+                      item.id === undefined
+                        ? undefined
+                        : output.find((done) => done.type === item.type && done.id === item.id)
+                    const indexed = indexedOutput[index]
+                    return done ?? (indexed?.type === "reasoning" ? indexed : item)
+                  })
                 : output.slice(),
             } satisfies CheckpointValue,
           },
