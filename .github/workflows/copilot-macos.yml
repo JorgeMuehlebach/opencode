@@ -1,0 +1,92 @@
+name: Copilot macOS
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-macos.yml
+      - .github/actions/setup-bun/**
+      - packages/ai/**
+      - packages/core/**
+      - packages/cli/**
+      - packages/schema/**
+      - packages/plugin/**
+      - packages/util/**
+      - patches/**
+      - bun.lock
+      - package.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: copilot-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-26
+            target: opencode-darwin-arm64
+            bundle: cli-darwin-arm64
+          - arch: x64
+            runner: macos-26-intel
+            target: opencode-darwin-x64-baseline
+            bundle: cli-darwin-x64-baseline
+    defaults:
+      run:
+        shell: bash
+    env:
+      OPENCODE_CHANNEL: copilot-preview
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun and dependencies
+        uses: ./.github/actions/setup-bun
+
+      - name: Check AI and Core types
+        run: |
+          bun run --cwd packages/ai typecheck:tsc
+          bun run --cwd packages/core typecheck:tsc
+
+      - name: Test AI protocols
+        run: GITHUB_ACTIONS=false bun run --cwd packages/ai test
+
+      - name: Test Copilot and session integration
+        working-directory: packages/core
+        run: |
+          GITHUB_ACTIONS=false bun run test test/github-copilot test/plugin/provider-github-copilot.test.ts \
+            test/session-model-transport.test.ts test/session-model-transport-live.test.ts \
+            test/model-resolver.test.ts test/session-model-request.test.ts \
+            test/session-model-request-hooks.test.ts
+
+      - name: Build native macOS executable and web UI
+        working-directory: packages/cli
+        run: bun run build --target=${{ matrix.target }} --skip-install
+
+      - name: Smoke test and package executable
+        working-directory: packages/cli/dist
+        run: |
+          ./${{ matrix.bundle }}/bin/opencode --version
+          ./${{ matrix.bundle }}/bin/opencode --help
+          tar -czf opencode-macos-${{ matrix.arch }}.tar.gz \
+            -C ${{ matrix.bundle }} bin/opencode package.json
+
+      - name: Upload macOS build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opencode-macos-${{ matrix.arch }}
+          path: packages/cli/dist/opencode-macos-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7

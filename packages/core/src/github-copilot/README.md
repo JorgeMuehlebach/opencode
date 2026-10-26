@@ -71,6 +71,28 @@ Live inference is a separate acceptance step from the local protocol tests.
 WebSockets reduce repeated history uploads; they do not increase the model's
 context window or remove gateway limits.
 
+### macOS
+
+The `Copilot macOS` workflow runs the protocol and session tests on native Apple
+Silicon and Intel runners, builds the CLI with its embedded web UI, and executes
+the built binary. Its downloadable `.tar.gz` artifacts preserve executable
+permissions. The Intel build uses Bun's baseline target for CPU compatibility.
+
+To run from source on a Mac, use Node 24 and the Bun version pinned by the root
+`packageManager` field, then run:
+
+```bash
+git clone https://github.com/JorgeMuehlebach/opencode.git
+cd opencode
+bun install --frozen-lockfile
+bun run dev --standalone
+```
+
+Sign in with `/connect` and follow the live acceptance procedure above. Build a
+local executable with `bun run --cwd packages/cli build --single --skip-install`.
+Copilot authentication and WebSocket behavior use the same implementation on
+macOS and Linux; the macOS workflow does not use a Copilot subscription.
+
 ## HTTP Adapters
 
 This directory contains upstream-derived AI SDK implementations adapted for
