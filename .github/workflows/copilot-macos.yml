@@ -34,11 +34,11 @@ jobs:
         include:
           - arch: arm64
             runner: macos-26
-            target: opencode-darwin-arm64
+            target: darwin-arm64
             bundle: cli-darwin-arm64
           - arch: x64
             runner: macos-26-intel
-            target: opencode-darwin-x64-baseline
+            target: darwin-x64-baseline
             bundle: cli-darwin-x64-baseline
     defaults:
       run:
@@ -73,7 +73,9 @@ jobs:
 
       - name: Build native macOS executable and web UI
         working-directory: packages/cli
-        run: bun run build --target=${{ matrix.target }} --skip-install
+        env:
+          OPENCODE_TARGET: ${{ matrix.target }}
+        run: bun run build --skip-install
 
       - name: Smoke test and package executable
         working-directory: packages/cli/dist

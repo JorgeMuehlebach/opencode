@@ -1,0 +1,178 @@
+name: GitHub Release
+
+on:
+  push:
+    tags:
+      - v*-fork.*
+  pull_request:
+    paths:
+      - .github/workflows/release-github.yml
+      - .github/actions/setup-bun/**
+      - install
+      - packages/cli/**
+      - bun.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  OPENCODE_CHANNEL: latest
+  OPENCODE_UPDATE_REPOSITORY: ${{ github.repository }}
+
+jobs:
+  version:
+    if: github.repository != 'anomalyco/opencode'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - name: Resolve release version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            version="${REF_NAME#v}"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-fork\.[1-9][0-9]*$ ]] || exit 1
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            version="0.0.0-github.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-26
+            targets: opencode-darwin-arm64
+          - platform: darwin-x64
+            runner: macos-26-intel
+            targets: opencode-darwin-x64 opencode-darwin-x64-baseline
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            targets: opencode-linux-x64 opencode-linux-x64-baseline
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            targets: opencode-linux-arm64
+          - platform: windows-x64
+            runner: windows-2025
+            targets: opencode-windows-x64 opencode-windows-x64-baseline
+          - platform: windows-arm64
+            runner: windows-11-arm
+            targets: opencode-windows-arm64
+    defaults:
+      run:
+        shell: bash
+    env:
+      OPENCODE_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun and dependencies
+        uses: ./.github/actions/setup-bun
+
+      - name: Check repository
+        if: matrix.platform == 'linux-x64'
+        run: bun run check
+
+      - name: Test update and install behavior
+        run: |
+          bun run --cwd packages/cli test src/services/updater.test.ts test/updater-install.test.ts test/github-updater.test.ts test/github-installer.test.ts
+          GITHUB_ACTIONS=false bun run --cwd packages/ai test test/provider/github-copilot-responses.test.ts
+
+      - name: Build and package native executables with web UI
+        working-directory: packages/cli
+        env:
+          TARGETS: ${{ matrix.targets }}
+        run: |
+          mkdir -p release
+          for target in $TARGETS; do
+            bundle="${target/opencode-/cli-}"
+            outdir="dist/github/$target"
+            OPENCODE_TARGET="${target#opencode-}" bun run build --outdir="$outdir" --skip-install
+            executable=opencode
+            if [[ "$target" = *windows* ]]; then executable=opencode.exe; fi
+            "$outdir/$bundle/bin/$executable" --version
+            "$outdir/$bundle/bin/$executable" --help
+            mv "$outdir/$bundle" "$outdir/package"
+            tar -czf "release/$bundle.tgz" -C "$outdir" package
+          done
+
+      - name: Upload release archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: packages/cli/release/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [version, build]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify release commit is on the default branch
+        run: |
+          branch=$(gh repo view "$GITHUB_REPOSITORY" --json defaultBranchRef --jq .defaultBranchRef.name)
+          git merge-base --is-ancestor HEAD "origin/$branch"
+
+      - name: Download release archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+
+      - name: Prepare installer, update metadata and checksums
+        run: |
+          cp install release/install
+          printf '{"version":"%s"}\n' "$RELEASE_VERSION" > release/release.json
+          cd release
+          sha256sum *.tgz install release.json > SHA256SUMS
+
+      - name: Publish complete release
+        run: |
+          tag="v$RELEASE_VERSION"
+          cat > notes.md <<'EOF'
+          Native OpenCode CLI executables with the embedded web UI.
+
+          Install using the attached `install` script with `--repository OWNER/REPO`. Installed builds use `/update` or `opencode upgrade` to stay on this repository's releases. See `docs/github-releases.md` for platform support, verification and release instructions.
+          EOF
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > draft.txt 2>/dev/null; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "OpenCode $RELEASE_VERSION" --notes-file notes.md
+          elif [ "$(cat draft.txt)" != true ]; then
+            echo "Published releases are immutable; create a new version." >&2
+            exit 1
+          fi
+          gh release upload "$tag" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest

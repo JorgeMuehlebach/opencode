@@ -18,6 +18,7 @@ Options:
     -h, --help              Display this help message
     -v, --version <version> Install a specific version (e.g., 0.0.0-beta-17236)
     -b, --binary <path>     Install from a local binary instead of downloading
+        --repository <repo> Install from GitHub Releases (OWNER/REPO)
         --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
 
 Examples:
@@ -30,6 +31,7 @@ EOF
 requested_version=${VERSION:-}
 no_modify_path=false
 binary_path=""
+repository=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -59,12 +61,47 @@ while [[ $# -gt 0 ]]; do
             no_modify_path=true
             shift
             ;;
+        --repository)
+            if [[ -n "${2:-}" ]]; then
+                repository="$2"
+                shift 2
+            else
+                echo -e "${RED}Error: --repository requires OWNER/REPO${NC}"
+                exit 1
+            fi
+            ;;
         *)
             echo -e "${ORANGE}Warning: Unknown option '$1'${NC}" >&2
             shift
             ;;
     esac
 done
+
+if [[ -n "$repository" ]] && [[ ! "$repository" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+$ || "$repository" == */. || "$repository" == */.. ]]; then
+    echo -e "${RED}Error: Invalid GitHub repository: $repository${NC}"
+    exit 1
+fi
+
+validate_release_version() {
+    local version="$1"
+    if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+        echo -e "${RED}Error: Invalid release version: $version${NC}"
+        exit 1
+    fi
+    local prerelease="${version%%+*}"
+    if [[ "$prerelease" == *-* ]]; then
+        prerelease="${prerelease#*-}"
+        if [[ ".$prerelease." =~ \.0[0-9]+\. ]]; then
+            echo -e "${RED}Error: Invalid release version: $version${NC}"
+            exit 1
+        fi
+    fi
+}
+
+if [[ -n "$repository" && -n "$requested_version" ]]; then
+    requested_version="${requested_version#v}"
+    validate_release_version "$requested_version"
+fi
 
 INSTALL_DIR=$HOME/.opencode/bin
 mkdir -p "$INSTALL_DIR"
@@ -174,42 +211,57 @@ else
         exit 1
     fi
 
-    package_scope="@opencode"
-    if [ -z "$requested_version" ]; then
-        metadata=$(curl -fsSL https://opencode.ai/update/api/latest/cli/npm || true)
-        specific_version=$(echo "$metadata" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
-        package=$(echo "$metadata" | sed -n 's/.*"package":"\([^"]*\)".*/\1/p')
+    if [[ -n "$repository" ]]; then
+        specific_version="$requested_version"
+        if [[ -z "$specific_version" ]]; then
+            release_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$repository/releases/latest")
+            if [[ "$release_url" != https://github.com/*/releases/tag/v* ]]; then
+                echo -e "${RED}Failed to resolve the latest GitHub release${NC}"
+                exit 1
+            fi
+            specific_version="${release_url##*/releases/tag/v}"
+        fi
+        validate_release_version "$specific_version"
+        filename="cli-$target.tgz"
+        url="https://github.com/$repository/releases/download/v$specific_version/$filename"
+    else
+        package_scope="@opencode"
+        if [ -z "$requested_version" ]; then
+            metadata=$(curl -fsSL https://opencode.ai/update/api/latest/cli/npm || true)
+            specific_version=$(echo "$metadata" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+            package=$(echo "$metadata" | sed -n 's/.*"package":"\([^"]*\)".*/\1/p')
 
-        if [ -z "$specific_version" ] || [ -z "$package" ]; then
-            echo -e "${RED}Failed to fetch version information${NC}"
+            if [ -z "$specific_version" ] || [ -z "$package" ]; then
+                echo -e "${RED}Failed to fetch version information${NC}"
+                exit 1
+            fi
+            package_scope="${package%/cli}"
+        else
+            # Strip leading 'v' if present
+            requested_version="${requested_version#v}"
+            specific_version=$requested_version
+        fi
+
+        package_name="$package_scope/cli-$target"
+        http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/$package_scope%2fcli-$target/$specific_version" || true)
+        # Older clients install the minimum release before they can migrate package names.
+        if [ "$http_status" = "404" ] && [ -n "$requested_version" ]; then
+            package_name="@opencode-ai/cli-$target"
+            http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@opencode-ai%2fcli-$target/$specific_version" || true)
+        fi
+        if [ "$http_status" = "404" ]; then
+            echo -e "${RED}Error: Version ${specific_version} is not available for $target${NC}"
+            echo -e "${MUTED}Available versions: https://www.npmjs.com/package/$package_name?activeTab=versions${NC}"
             exit 1
         fi
-        package_scope="${package%/cli}"
-    else
-        # Strip leading 'v' if present
-        requested_version="${requested_version#v}"
-        specific_version=$requested_version
-    fi
+        if [ "$http_status" != "200" ]; then
+            echo -e "${RED}Failed to fetch package information${NC}"
+            exit 1
+        fi
 
-    package_name="$package_scope/cli-$target"
-    http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/$package_scope%2fcli-$target/$specific_version" || true)
-    # Older clients install the minimum release before they can migrate package names.
-    if [ "$http_status" = "404" ] && [ -n "$requested_version" ]; then
-        package_name="@opencode-ai/cli-$target"
-        http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@opencode-ai%2fcli-$target/$specific_version" || true)
+        filename="cli-$target-$specific_version.tgz"
+        url="https://registry.npmjs.org/$package_name/-/$filename"
     fi
-    if [ "$http_status" = "404" ]; then
-        echo -e "${RED}Error: Version ${specific_version} is not available for $target${NC}"
-        echo -e "${MUTED}Available versions: https://www.npmjs.com/package/$package_name?activeTab=versions${NC}"
-        exit 1
-    fi
-    if [ "$http_status" != "200" ]; then
-        echo -e "${RED}Failed to fetch package information${NC}"
-        exit 1
-    fi
-
-    filename="cli-$target-$specific_version.tgz"
-    url="https://registry.npmjs.org/$package_name/-/$filename"
     binary_name="$SOURCE_APP"
     if [ "$os" = "windows" ]; then
         binary_name="$SOURCE_APP.exe"
@@ -305,13 +357,25 @@ download_with_progress() {
 }
 
 download_and_install() {
+    if [[ -n "$repository" ]]; then
+        install_github_release
+        return
+    fi
     print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}version: ${NC}$specific_version"
     local tmp_dir="${TMPDIR:-/tmp}/opencode_install_$$"
     mkdir -p "$tmp_dir"
 
     if [[ "$os" == "windows" ]] || ! [ -t 2 ] || ! download_with_progress "$url" "$tmp_dir/$filename"; then
         # Fallback to standard curl on Windows, non-TTY environments, or if custom progress fails
-        curl -f -# -L -o "$tmp_dir/$filename" "$url"
+        local ret=0
+        curl -f -# -L -o "$tmp_dir/$filename" "$url" || ret=$?
+        # curl exits 23 when it cannot write the file, usually because the temporary directory is full.
+        if [ "$ret" -eq 23 ]; then
+            print_message error "Could not write the download to $tmp_dir. Make sure it has enough free space, or set TMPDIR to another directory, then try again." >&2
+        fi
+        if [ "$ret" -ne 0 ]; then
+            exit "$ret"
+        fi
     fi
 
     tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
@@ -323,6 +387,49 @@ download_and_install() {
     chmod 755 "$INSTALL_DIR/$installed_binary"
     rm -rf "$tmp_dir"
 }
+
+install_github_release() (
+    print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}version: ${NC}$specific_version"
+    # Stage beside the destination so the final rename is atomic on its filesystem.
+    tmp_dir=$(mktemp -d "$INSTALL_DIR/.update.XXXXXXXX")
+    trap 'rm -rf "$tmp_dir"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    curl -fsSL -o "$tmp_dir/$filename" "$url"
+    curl -fsSL -o "$tmp_dir/SHA256SUMS" "${url%/*}/SHA256SUMS"
+    expected=$(awk -v file="$filename" '$2 == file || $2 == "*" file { print $1 }' "$tmp_dir/SHA256SUMS")
+    if [[ ! "$expected" =~ ^[a-fA-F0-9]{64}$ ]]; then
+        print_message error "Missing or invalid checksum for $filename"
+        exit 1
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+        actual=$(shasum -a 256 "$tmp_dir/$filename")
+    elif command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$tmp_dir/$filename")
+    else
+        print_message error "A SHA-256 tool (shasum or sha256sum) is required"
+        exit 1
+    fi
+    actual="${actual%% *}"
+    if [[ "$actual" != "$expected" ]]; then
+        print_message error "Checksum mismatch for $filename"
+        exit 1
+    fi
+
+    installed_binary="$APP"
+    if [[ "$os" == "windows" ]]; then
+        installed_binary="$APP.exe"
+    fi
+    # Stream only the expected binary; other archive paths are never extracted.
+    tar -xOzf "$tmp_dir/$filename" "package/bin/$binary_name" > "$tmp_dir/$installed_binary"
+    if [[ ! -s "$tmp_dir/$installed_binary" ]]; then
+        print_message error "The release archive contains no executable"
+        exit 1
+    fi
+    chmod 755 "$tmp_dir/$installed_binary"
+    mv -f "$tmp_dir/$installed_binary" "$INSTALL_DIR/$installed_binary"
+)
 
 install_from_binary() {
     print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}from: ${NC}$binary_path"
