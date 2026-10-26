@@ -1,7 +1,13 @@
 import { Global } from "@opencode/util/global"
 import { AppProcess } from "@opencode/util/process"
 import { EffectFlock } from "@opencode/util/effect-flock"
-import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_LOCAL, OPENCODE_VERSION } from "../version"
+import {
+  OPENCODE_ARTIFACT,
+  OPENCODE_CHANNEL,
+  OPENCODE_LOCAL,
+  OPENCODE_UPDATE_REPOSITORY,
+  OPENCODE_VERSION,
+} from "../version"
 import { Context, Duration, Effect, FileSystem, Layer, Option, Ref, Schema } from "effect"
 import { ChildProcess } from "effect/process"
 import { parse, type ParseError } from "jsonc-parser"
@@ -43,6 +49,14 @@ export class UpgradeError extends Error {
 
 const decodeVpPackages = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Array(Schema.Struct({ name: Schema.String }))),
+)
+
+const decodeRelease = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    version: Schema.optional(Schema.String),
+    metadata: Schema.optional(Schema.Struct({ package: Schema.optional(Schema.String) })),
+    versions: Schema.optional(Schema.Struct({ stable: Schema.optional(Schema.String) })),
+  }),
 )
 
 const installNames: Record<Method, string> = {
@@ -217,7 +231,10 @@ const make = Effect.gen(function* () {
     if (installedWinget) return "winget"
     if (!installedPackage) return
 
-    const parts = executable.toLowerCase().split(path.sep).map((part) => part.replace(/^\./, ""))
+    const parts = executable
+      .toLowerCase()
+      .split(path.sep)
+      .map((part) => part.replace(/^\./, ""))
     const checks: Array<{ method: Method; command: string[] }> = [
       { method: "npm", command: ["npm", "list", "-g", "--depth=0", installedPackage] },
       { method: "pnpm", command: ["pnpm", "list", "-g", "--depth=0", installedPackage] },
@@ -273,15 +290,21 @@ const make = Effect.gen(function* () {
   }
 
   const release = Effect.fnUntraced(function* (method?: Method) {
+    if (OPENCODE_UPDATE_REPOSITORY && method && method !== "curl")
+      return yield* Effect.fail(
+        new Error("GitHub release builds update through the OpenCode installer. Use --method curl."),
+      )
     const distribution = method === "brew" ? "homebrew" : "npm"
     // Homebrew Core builds its formula on its own schedule, so the tap release does not describe it.
     const core = method === "brew" && installedFormula === "opencode"
     const response = yield* Effect.tryPromise({
       try: (signal) =>
         fetch(
-          core
-            ? "https://formulae.brew.sh/api/formula/opencode.json"
-            : `https://opencode.ai/update/api/${encodeURIComponent(channel)}/${encodeURIComponent(OPENCODE_ARTIFACT)}/${distribution}?current=${encodeURIComponent(OPENCODE_VERSION)}`,
+          OPENCODE_UPDATE_REPOSITORY
+            ? `https://github.com/${OPENCODE_UPDATE_REPOSITORY}/releases/latest/download/release.json`
+            : core
+              ? "https://formulae.brew.sh/api/formula/opencode.json"
+              : `https://opencode.ai/update/api/${encodeURIComponent(channel)}/${encodeURIComponent(OPENCODE_ARTIFACT)}/${distribution}?current=${encodeURIComponent(OPENCODE_VERSION)}`,
           {
             signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
           },
@@ -304,10 +327,13 @@ const make = Effect.gen(function* () {
           retry: "Try again in a few minutes.",
         }),
       )
-    const data: { version?: string; metadata?: { package?: string }; versions?: { stable?: string } } =
-      yield* Effect.tryPromise({
-        try: () => response.json(),
-        catch: (cause) =>
+    const data = yield* Effect.tryPromise({
+      try: () => response.json(),
+      catch: (cause) => cause,
+    }).pipe(
+      Effect.flatMap(decodeRelease),
+      Effect.mapError(
+        (cause) =>
           new UpgradeError(
             {
               title: "Could not read the OpenCode update information",
@@ -316,10 +342,11 @@ const make = Effect.gen(function* () {
             },
             { cause },
           ),
-      })
+      ),
+    )
     const version = core ? data.versions?.stable : data.version
-    const packageName = core ? "opencode" : data.metadata?.package
-    if (!version || !packageName)
+    const packageName = OPENCODE_UPDATE_REPOSITORY || (core ? "opencode" : data.metadata?.package)
+    if (!version || !packageName || !parseReleaseVersion(version))
       return yield* Effect.fail(
         new UpgradeError({
           title: "Could not read the OpenCode update information",
@@ -361,7 +388,9 @@ const make = Effect.gen(function* () {
   const latest = (selected?: Method) =>
     (selected ? Effect.succeed(selected) : method()).pipe(
       Effect.flatMap((method) =>
-        method === "winget" ? wingetVersion() : release(method).pipe(Effect.map((data) => data.version)),
+        method === "winget" && !OPENCODE_UPDATE_REPOSITORY
+          ? wingetVersion()
+          : release(method).pipe(Effect.map((data) => data.version)),
       ),
     )
 
@@ -424,9 +453,14 @@ const make = Effect.gen(function* () {
 
   const upgrade = Effect.fnUntraced(function* (method: Method, input: string) {
     if (!parseReleaseVersion(input)) return yield* Effect.fail(new Error(`Invalid version: ${input}`))
+    if (OPENCODE_UPDATE_REPOSITORY && method !== "curl")
+      return yield* Effect.fail(
+        new Error("GitHub release builds update through the OpenCode installer. Use --method curl."),
+      )
     const version = input.trim().replace(/^v/, "")
-    const packageName =
-      method === "winget"
+    const packageName = OPENCODE_UPDATE_REPOSITORY
+      ? OPENCODE_UPDATE_REPOSITORY
+      : method === "winget"
         ? wingetPackage
         : method === "brew" && installedFormula === "opencode"
           ? "opencode"
@@ -477,10 +511,13 @@ const make = Effect.gen(function* () {
           yield* fs.makeDirectory(global.cache, { recursive: true })
           const directory = yield* temporaryDirectory("update-")
           const installer = path.join(directory, "install")
+          const url = OPENCODE_UPDATE_REPOSITORY
+            ? `https://github.com/${OPENCODE_UPDATE_REPOSITORY}/releases/download/v${encodeURIComponent(version)}/install`
+            : "https://opencode.ai/v2/install"
           yield* runUpgrade({
             method,
-            command: ["curl", "-fsSL", "-o", installer, "https://opencode.ai/v2/install"],
-            displayCommand: ["curl", "-fsSL", "https://opencode.ai/v2/install"],
+            command: ["curl", "-fsSL", "-o", installer, url],
+            displayCommand: ["curl", "-fsSL", url],
             title: "Could not download the OpenCode installer",
             retry: "Check your network, then run opencode upgrade again.",
           })
@@ -488,7 +525,14 @@ const make = Effect.gen(function* () {
             method,
             runUpgrade({
               method,
-              command: [bash, installer, "--version", version, "--no-modify-path"],
+              command: [
+                bash,
+                installer,
+                "--version",
+                version,
+                "--no-modify-path",
+                ...(OPENCODE_UPDATE_REPOSITORY ? ["--repository", OPENCODE_UPDATE_REPOSITORY] : []),
+              ],
               displayCommand: ["opencode", "upgrade", version, "--method", "curl"],
               title: "The OpenCode installer failed",
             }),
