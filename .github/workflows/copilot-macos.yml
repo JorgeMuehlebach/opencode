@@ -67,6 +67,7 @@ jobs:
         working-directory: packages/core
         run: |
           GITHUB_ACTIONS=false bun run test test/github-copilot test/plugin/provider-github-copilot.test.ts \
+            test/aisdk.test.ts \
             test/session-model-transport.test.ts test/session-model-transport-live.test.ts \
             test/model-resolver.test.ts test/session-model-request.test.ts \
             test/session-model-request-hooks.test.ts

@@ -23,6 +23,7 @@ import {
   ProviderID,
   ProviderMetadata,
   TransportError,
+  UnsupportedOperationError,
   ToolResultValue,
   type ContentPart,
   type LLMRequest,
@@ -39,6 +40,7 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import type { ID, RuntimeInfo } from "./model.js"
 import { Provider } from "./provider.js"
 import { State } from "./state.js"
+import { CopilotWebSocket } from "./github-copilot/websocket.js"
 import { stringify } from "./tool/runtime.js"
 
 type SDK = any
@@ -124,14 +126,24 @@ function prepareOptions(model: RuntimeInfo, pkg: string) {
   const settings = model.settings ?? {}
   const options: Record<string, unknown> = {
     name: model.canonical ?? model.providerID,
-    ...Provider.nativeSettings(settings),
+    ...Struct.omit(Provider.nativeSettings(settings), ["websocket"]),
     headers: model.headers,
     body: projected.body,
   }
 
   const customFetch = settings.fetch
+  // A Copilot Responses request stays on WebSockets unless HTTP was explicitly selected.
+  const websocket = pkg === "@ai-sdk/github-copilot" && settings.transport !== "http" && settings.websocket !== false
   const timeouts = Provider.timeouts(settings)
   options.fetch = async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (websocket && isFetch(customFetch))
+      throw new AIError({
+        reason: new UnsupportedOperationError({
+          message:
+            'A custom Copilot fetch requires explicitly setting transport to "http"; WebSockets do not use fetch.',
+          operation: "copilot-websocket",
+        }),
+      })
     const opts = { ...(init ?? {}) }
     // A plain AbortSignal.timeout would keep running into the body stream, so the header limit uses
     // a timer that is cleared once headers arrive. The whole-request limit is meant to span the body.
@@ -157,7 +169,7 @@ function prepareOptions(model: RuntimeInfo, pkg: string) {
       }
     }
 
-    const send: Fetch = isFetch(customFetch) ? customFetch : fetch
+    const send: Fetch = websocket ? CopilotWebSocket.request : isFetch(customFetch) ? customFetch : fetch
     const middleware = httpMiddleware.getStore()
     const res = await (
       middleware
@@ -458,6 +470,7 @@ function requestSettings(settings: Provider.Settings | undefined) {
     "authToken",
     "baseURL",
     "fetch",
+    "websocket",
   ])
   return Object.keys(result).length === 0 ? undefined : result
 }

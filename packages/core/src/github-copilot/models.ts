@@ -160,14 +160,11 @@ function build(id: Model.ID, remote: UsableModel, baseURL: string, previous?: Mo
     providerID: Provider.ID.githubCopilot,
     family: previous?.family ?? Model.Family.make(remote.capabilities.family),
     name: previous?.name ?? remote.name,
-    package: messages
-      ? "@opencode/ai/providers/anthropic"
-      : webSocket
-        ? "@opencode/ai/providers/github-copilot"
-        : Provider.aisdk("@ai-sdk/github-copilot"),
+    package: messages ? "@opencode/ai/providers/anthropic" : Provider.aisdk("@ai-sdk/github-copilot"),
     settings: Provider.mergeOverlay(previous?.settings, {
       baseURL: messages ? `${baseURL}/v1` : baseURL,
       ...(endpoint ? { endpoint } : {}),
+      ...(webSocket ? { websocket: previous?.settings?.websocket ?? true } : {}),
     }),
     headers: previous?.headers,
     body: previous?.body,

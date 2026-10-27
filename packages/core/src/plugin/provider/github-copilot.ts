@@ -217,7 +217,7 @@ export const GithubCopilotPlugin = define({
     yield* ctx.provider.transform((evt) => {
       const item = evt.get(Provider.ID.githubCopilot)
       if (!item) return
-      // Only models advertising ws:/responses have a channel; the other Copilot APIs stay on HTTP.
+      // The SDK bridge owns WebSocket inference; HTTP requires an explicit policy.
       const settings = Provider.mergeOverlay({ transport: "websocket" }, item.provider.settings)
       evt.update(item.provider.id, (provider) => {
         provider.settings = settings
@@ -304,8 +304,13 @@ export const GithubCopilotPlugin = define({
       (evt) =>
         Effect.gen(function* () {
           if (evt.model.providerID !== Provider.ID.githubCopilot) return
+          const provider = yield* providers.get(Provider.ID.githubCopilot)
+          // The utility endpoint is HTTPS-only; the default policy must also cover background inference.
+          if (provider?.settings?.transport !== "http") return
           if (!loaded.baseURL || !loaded.token || !loaded.models) return
-          const agent = yield* ctx.agent.get({ agentID: Agent.ID.make("title") }).pipe(Effect.orElseSucceed(() => undefined))
+          const agent = yield* ctx.agent
+            .get({ agentID: Agent.ID.make("title") })
+            .pipe(Effect.orElseSucceed(() => undefined))
           if (agent?.data.model) return
           const model = utilityTitleModels.find((id) => loaded.models?.has(id))
           if (!model) return

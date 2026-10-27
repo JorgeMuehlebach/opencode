@@ -148,15 +148,23 @@ test("prices cache reads from either token price spelling", async () => {
 
   try {
     const models = await CopilotModels.get(server.url.origin, {}, [])
-    expect(models.get(Model.ID.make("renamed"))?.cost[0]).toMatchObject({ input: 2.5, output: 15, cache: { read: 0.25 } })
-    expect(models.get(Model.ID.make("legacy"))?.cost[0]).toMatchObject({ input: 2.5, output: 15, cache: { read: 0.25 } })
+    expect(models.get(Model.ID.make("renamed"))?.cost[0]).toMatchObject({
+      input: 2.5,
+      output: 15,
+      cache: { read: 0.25 },
+    })
+    expect(models.get(Model.ID.make("legacy"))?.cost[0]).toMatchObject({
+      input: 2.5,
+      output: 15,
+      cache: { read: 0.25 },
+    })
     expect(models.get(Model.ID.make("unpriced"))?.cost[0]).toMatchObject({ cache: { read: 0 } })
   } finally {
     await server.stop(true)
   }
 })
 
-test("uses native Responses only for models advertising WebSocket support", async () => {
+test("uses the Copilot SDK bridge for advertised WebSocket Responses models", async () => {
   const items = [
     { id: "gpt-6-luna", supported_endpoints: ["/responses", "ws:/responses"] },
     { id: "gpt-6.1-sol", supported_endpoints: ["ws:/responses"] },
@@ -189,29 +197,51 @@ test("uses native Responses only for models advertising WebSocket support", asyn
       modelID: Model.ID.make("gpt-6-luna"),
       name: "My Luna",
       headers: { "x-custom": "preserved" },
+      body: { custom: "preserved" },
       settings: { reasoningSummary: "detailed" },
     })
-    const models = await CopilotModels.get(server.url.origin, {}, [alias])
+    const disabled = Model.Info.make({
+      ...Model.Info.default(Provider.ID.githubCopilot, Model.ID.make("luna-http")),
+      modelID: Model.ID.make("gpt-6-luna"),
+      settings: { websocket: false },
+    })
+    const http = Model.Info.make({
+      ...Model.Info.default(Provider.ID.githubCopilot, Model.ID.make("sol-http")),
+      modelID: Model.ID.make("gpt-6.1-sol"),
+      settings: { transport: "http" },
+    })
+    const models = await CopilotModels.get(server.url.origin, {}, [alias, disabled, http])
     for (const id of ["gpt-6-luna", "gpt-6.1-sol", "my-luna"]) {
       expect(models.get(Model.ID.make(id))).toMatchObject({
-        package: "@opencode/ai/providers/github-copilot",
-        settings: { baseURL: server.url.origin, endpoint: "responses" },
+        package: Provider.aisdk("@ai-sdk/github-copilot"),
+        settings: { baseURL: server.url.origin, endpoint: "responses", websocket: true },
       })
     }
     expect(models.get(alias.id)).toMatchObject({
       modelID: "gpt-6-luna",
       name: "My Luna",
       headers: { "x-custom": "preserved" },
+      body: { custom: "preserved" },
       settings: { reasoningSummary: "detailed" },
+    })
+    expect(models.get(disabled.id)).toMatchObject({
+      package: Provider.aisdk("@ai-sdk/github-copilot"),
+      settings: { endpoint: "responses", websocket: false },
+    })
+    expect(models.get(http.id)).toMatchObject({
+      package: Provider.aisdk("@ai-sdk/github-copilot"),
+      settings: { endpoint: "responses", transport: "http", websocket: true },
     })
     for (const id of ["gpt-http", "chat-only"]) {
       expect(models.get(Model.ID.make(id))?.package).toBe(Provider.aisdk("@ai-sdk/github-copilot"))
+      expect(models.get(Model.ID.make(id))?.settings?.websocket).toBeUndefined()
     }
     for (const id of ["claude-sonnet", "claude-messages"]) {
       expect(models.get(Model.ID.make(id))).toMatchObject({
         package: "@opencode/ai/providers/anthropic",
         settings: { baseURL: `${server.url.origin}/v1`, endpoint: "messages" },
       })
+      expect(models.get(Model.ID.make(id))?.settings?.websocket).toBeUndefined()
     }
   } finally {
     await server.stop(true)
