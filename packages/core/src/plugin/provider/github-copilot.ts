@@ -304,9 +304,6 @@ export const GithubCopilotPlugin = define({
       (evt) =>
         Effect.gen(function* () {
           if (evt.model.providerID !== Provider.ID.githubCopilot) return
-          const provider = yield* providers.get(Provider.ID.githubCopilot)
-          // The utility endpoint is HTTPS-only; the default policy must also cover background inference.
-          if (provider?.settings?.transport !== "http") return
           if (!loaded.baseURL || !loaded.token || !loaded.models) return
           const agent = yield* ctx.agent
             .get({ agentID: Agent.ID.make("title") })

@@ -2,7 +2,7 @@
 
 ## Responses WebSockets
 
-Copilot inference uses WebSockets by default. The transport sends one
+Copilot models advertising WebSocket support use WebSockets by default. The transport sends one
 `response.create` request per connection and presents incoming events as SSE
 inside OpenCode, preserving the existing Copilot SDK, request hooks, timeouts,
 tools and stateless reasoning replay. Conversation history is sent in full;
@@ -13,11 +13,12 @@ models use the bundled Copilot SDK bridge, including when catalog discovery is
 unavailable. A rejected upgrade, interrupted stream or provider error fails the
 request. It never automatically retries inference over HTTPS.
 
-Models exposed only through Anthropic Messages (including current Claude
-routes) or Chat Completions require an explicit HTTP policy. Selecting one under
-the default policy reports a transport error instead of silently changing the
-transport. OAuth, account checks and model discovery still use HTTPS. The
-HTTPS-only utility title endpoint is skipped under the WebSocket policy.
+HTTPS-only models, including current Claude Anthropic Messages routes and Chat
+Completions models, continue to use HTTPS. The catalog also selects HTTPS for
+Responses models that do not advertise WebSocket support. This choice happens
+before inference; a failed WebSocket request never falls back to HTTPS. OAuth,
+account checks, model discovery and the HTTPS-only utility title endpoint also
+continue to use HTTPS.
 
 To deliberately use HTTPS, set the provider policy in `opencode.jsonc`:
 
@@ -33,8 +34,9 @@ To deliberately use HTTPS, set the provider policy in `opencode.jsonc`:
 
 Remove that override or set it to `"websocket"` to restore WebSockets. The older
 explicit `websocket: false` model setting also opts into HTTP for SDK models.
-A custom `fetch` implementation requires the explicit HTTP policy; it cannot
-silently replace the WebSocket connection.
+A custom `fetch` implementation is supported for HTTPS routes. Responses models
+using WebSockets require an explicit HTTP override before using custom fetch; it
+cannot silently replace a failed WebSocket connection.
 
 WebSocket connections use OpenCode's platform constructor, including `WSS_PROXY`,
 `HTTPS_PROXY`, `WS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`. Runtime trust
@@ -61,8 +63,8 @@ For live acceptance, use an account entitled to the intended model:
    to exercise replay of assistant output, tool results and reasoning.
 4. Confirm a WebSocket upgrade and `response.create` frames in network diagnostics.
    SSE framing inside the SDK is an implementation detail, not an HTTPS request.
-5. A blocked upgrade must produce a visible error. Test HTTPS-only models only
-   after explicitly choosing the HTTP policy above.
+5. A blocked upgrade must produce a visible error. HTTPS-only models should
+   continue working through their advertised HTTPS API.
 
 Local protocol tests do not require a Copilot subscription. Authenticated live
 inference is a separate acceptance step. WebSockets do not increase model context

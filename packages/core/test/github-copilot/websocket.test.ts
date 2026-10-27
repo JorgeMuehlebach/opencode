@@ -36,7 +36,7 @@ const response = (index: number) => [
 ]
 
 describe("Copilot catalog to SDK WebSocket bridge", () => {
-  for (const mode of ["websocket", "rejected", "http"] as const) {
+  for (const mode of ["websocket", "rejected", "http", "https-only"] as const) {
     it.live(`uses ${mode} policy without changing transport`, () =>
       Effect.gen(function* () {
         const bodies: Array<Record<string, unknown>> = []
@@ -52,7 +52,7 @@ describe("Copilot catalog to SDK WebSocket bridge", () => {
                     name: "Sol",
                     version: "2026-10-01",
                     model_picker_enabled: true,
-                    supported_endpoints: ["/responses", "ws:/responses"],
+                    supported_endpoints: mode === "https-only" ? ["/responses"] : ["/responses", "ws:/responses"],
                     capabilities: {
                       family: "gpt",
                       limits: { max_prompt_tokens: 200000, max_output_tokens: 32000 },
@@ -90,7 +90,7 @@ describe("Copilot catalog to SDK WebSocket bridge", () => {
           {
             ...info,
             settings: {
-              ...Struct.omit(info.settings ?? {}, ["websocket"]),
+              ...(mode === "https-only" ? info.settings : Struct.omit(info.settings ?? {}, ["websocket"])),
               ...(mode === "http" ? { transport: "http" } : {}),
             },
           },
@@ -131,7 +131,7 @@ describe("Copilot catalog to SDK WebSocket bridge", () => {
           expect(bodies[1]).toMatchObject({ type: "response.create", initiator: "user", store: false })
           expect(bodies[1]?.stream).toBeUndefined()
         }
-        if (mode === "http") {
+        if (mode === "http" || mode === "https-only") {
           expect(handshakes).toHaveLength(0)
           expect(httpHeaders).toHaveLength(2)
           expect(httpHeaders.every((headers) => headers.authorization === "Bearer fixture-copilot-token")).toBe(true)

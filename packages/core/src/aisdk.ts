@@ -133,9 +133,13 @@ function prepareOptions(model: RuntimeInfo, pkg: string) {
 
   const customFetch = settings.fetch
   // A Copilot Responses request stays on WebSockets unless HTTP was explicitly selected.
-  const websocket = pkg === "@ai-sdk/github-copilot" && settings.transport !== "http" && settings.websocket !== false
+  const copilotWebSocket =
+    pkg === "@ai-sdk/github-copilot" && settings.transport !== "http" && settings.websocket !== false
   const timeouts = Provider.timeouts(settings)
   options.fetch = async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    // Chat-only models deliberately use HTTPS; a failed Responses upgrade never changes this choice.
+    const websocket =
+      copilotWebSocket && /\/responses\/?$/.test(new URL(input instanceof Request ? input.url : String(input)).pathname)
     if (websocket && isFetch(customFetch))
       throw new AIError({
         reason: new UnsupportedOperationError({

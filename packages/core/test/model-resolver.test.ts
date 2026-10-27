@@ -82,15 +82,13 @@ function withConfigEnv<A, E, R>(env: Record<string, string>, effect: () => Effec
 }
 
 describe("ModelResolver", () => {
-  it.effect("requires explicit HTTP for Copilot Anthropic Messages models", () =>
+  it.effect("allows HTTPS-only Copilot Anthropic Messages models under the WebSocket policy", () =>
     Effect.gen(function* () {
       const input = model("@opencode/ai/providers/anthropic", {
         providerID: Provider.ID.githubCopilot,
-        settings: { baseURL: "https://api.githubcopilot.com/v1" },
+        settings: { baseURL: "https://api.githubcopilot.com/v1", transport: "websocket" },
       })
-      const error = yield* ModelResolver.fromCatalogModel(input).pipe(Effect.flip)
-      expect(error).toBeInstanceOf(ModelResolver.ModelConfigurationError)
-      expect(error.message).toContain("Anthropic Messages over HTTPS")
+      expect((yield* ModelResolver.fromCatalogModel(input)).route.providerMetadataKey).toBe("anthropic")
       const resolved = yield* ModelResolver.fromCatalogModel({
         ...input,
         settings: { ...input.settings, transport: "http" },

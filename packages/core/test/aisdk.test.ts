@@ -102,8 +102,10 @@ it.live("requires explicit HTTP before using a custom Copilot fetch", () =>
     yield* Effect.promise(async () => {
       await expect(websocket("https://copilot.invalid/responses")).rejects.toThrow("custom Copilot fetch")
       expect(sends).toEqual([])
-      expect(await (await http("https://copilot.invalid/responses")).json()).toEqual({ ok: true })
+      expect(await (await websocket("https://copilot.invalid/chat/completions")).json()).toEqual({ ok: true })
       expect(sends).toEqual(["http"])
+      expect(await (await http("https://copilot.invalid/responses")).json()).toEqual({ ok: true })
+      expect(sends).toEqual(["http", "http"])
     })
   }),
 )
