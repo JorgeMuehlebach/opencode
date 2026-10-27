@@ -210,7 +210,12 @@ test("uses the Copilot SDK bridge for advertised WebSocket Responses models", as
       modelID: Model.ID.make("gpt-6.1-sol"),
       settings: { transport: "http" },
     })
-    const models = await CopilotModels.get(server.url.origin, {}, [alias, disabled, http])
+    const forced = Model.Info.make({
+      ...Model.Info.default(Provider.ID.githubCopilot, Model.ID.make("gpt-forced-ws")),
+      modelID: Model.ID.make("gpt-http"),
+      settings: { websocket: true },
+    })
+    const models = await CopilotModels.get(server.url.origin, {}, [alias, disabled, http, forced])
     for (const id of ["gpt-6-luna", "gpt-6.1-sol", "my-luna"]) {
       expect(models.get(Model.ID.make(id))).toMatchObject({
         package: Provider.aisdk("@ai-sdk/github-copilot"),
@@ -232,10 +237,15 @@ test("uses the Copilot SDK bridge for advertised WebSocket Responses models", as
       package: Provider.aisdk("@ai-sdk/github-copilot"),
       settings: { endpoint: "responses", transport: "http", websocket: true },
     })
+    expect(models.get(forced.id)).toMatchObject({
+      package: Provider.aisdk("@ai-sdk/github-copilot"),
+      settings: { endpoint: "responses", websocket: true },
+    })
     for (const id of ["gpt-http", "chat-only"]) {
       expect(models.get(Model.ID.make(id))?.package).toBe(Provider.aisdk("@ai-sdk/github-copilot"))
-      expect(models.get(Model.ID.make(id))?.settings?.websocket).toBeUndefined()
+      expect(models.get(Model.ID.make(id))?.settings?.websocket).toBe(false)
     }
+    expect(models.get(Model.ID.make("gpt-http"))?.settings?.endpoint).toBe("responses")
     for (const id of ["claude-sonnet", "claude-messages"]) {
       expect(models.get(Model.ID.make(id))).toMatchObject({
         package: "@opencode/ai/providers/anthropic",

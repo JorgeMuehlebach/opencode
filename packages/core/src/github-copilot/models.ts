@@ -164,7 +164,7 @@ function build(id: Model.ID, remote: UsableModel, baseURL: string, previous?: Mo
     settings: Provider.mergeOverlay(previous?.settings, {
       baseURL: messages ? `${baseURL}/v1` : baseURL,
       ...(endpoint ? { endpoint } : {}),
-      ...(webSocket ? { websocket: previous?.settings?.websocket ?? true } : {}),
+      ...(!messages ? { websocket: previous?.settings?.websocket ?? webSocket } : {}),
     }),
     headers: previous?.headers,
     body: previous?.body,
