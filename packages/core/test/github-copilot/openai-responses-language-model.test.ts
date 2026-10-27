@@ -449,7 +449,12 @@ describe("doGenerate", () => {
 
 describe("doStream", () => {
   test.each([...HOSTED_TOOL_CASES])("uses $name for every streamed $id identity event", async (testCase) => {
-    const model = createModel(createStreamFetch(testCase.stream))
+    const model = createModel(
+      createStreamFetch([
+        ...testCase.stream,
+        { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+      ]),
+    )
     const result = await model.doStream({
       prompt: TEST_PROMPT,
       tools: [hostedTool(testCase)],

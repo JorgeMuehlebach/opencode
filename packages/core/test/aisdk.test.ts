@@ -1,6 +1,7 @@
 import { APICallError } from "@ai-sdk/provider"
 import type { LanguageModelV3, LanguageModelV3StreamPart } from "@ai-sdk/provider"
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
+import { createOpenaiCompatible } from "@opencode/core/github-copilot/copilot-provider"
 import { AISDK } from "@opencode/core/aisdk"
 import { SessionRunnerRetry } from "@opencode/core/session/runner/retry"
 import { toSessionError } from "@opencode/core/session/to-session-error"
@@ -71,6 +72,247 @@ const client = LLMClient.layer.pipe(
       }),
     ),
   ),
+)
+
+const copilotFinishes = [
+  { normalized: "stop", reason: null },
+  { normalized: "tool-calls", reason: null },
+  { normalized: "length", reason: "max_output_tokens" },
+  { normalized: "content-filter", reason: "content_filter" },
+  { normalized: "unknown", reason: "provider_unmapped" },
+] as const
+
+it.live("requires explicit HTTP before using a custom Copilot fetch", () =>
+  Effect.gen(function* () {
+    const aisdk = yield* AISDK.Service
+    const sends: string[] = []
+    const wrapped: Array<typeof fetch> = []
+    yield* aisdk.hook.sdk((event) => {
+      wrapped.push(event.options.fetch as typeof fetch)
+      event.sdk = { languageModel: () => streamModel([]) }
+    })
+    const customFetch = async () => {
+      sends.push("http")
+      return Response.json({ ok: true })
+    }
+    yield* aisdk.language(model("@ai-sdk/github-copilot", { fetch: customFetch }))
+    yield* aisdk.language(model("@ai-sdk/github-copilot", { fetch: customFetch, transport: "http" }))
+    const [websocket, http] = wrapped
+    if (!websocket || !http) return yield* Effect.die("Expected wrapped Copilot fetch functions")
+    yield* Effect.promise(async () => {
+      await expect(websocket("https://copilot.invalid/responses")).rejects.toThrow("custom Copilot fetch")
+      expect(sends).toEqual([])
+      expect(await (await http("https://copilot.invalid/responses")).json()).toEqual({ ok: true })
+      expect(sends).toEqual(["http"])
+    })
+  }),
+)
+
+copilotFinishes.forEach(({ normalized, reason }) =>
+  it.live(`uses Copilot WebSocket Responses and preserves ${normalized}`, () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = []
+      const seen: string[] = []
+      const server = Bun.serve({
+        port: 0,
+        fetch(request, server) {
+          seen.push(request.headers.get("x-hook") ?? "missing")
+          if (request.headers.has("content-length"))
+            return new Response("Unexpected HTTP body framing", { status: 400 })
+          if (server.upgrade(request)) return
+          return new Response(
+            'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"OK"}\n\n' +
+              'data: {"type":"response.completed","response":{"tools":[{"description":"cut off',
+            { headers: { "content-type": "text/event-stream" } },
+          )
+        },
+        websocket: {
+          message(socket, message) {
+            requests.push(JSON.parse(String(message)))
+            socket.send(
+              JSON.stringify({
+                type: "response.created",
+                response: { id: "resp_1", created_at: 1, model: "api-model" },
+              }),
+            )
+            socket.send(JSON.stringify({ type: "response.output_text.delta", item_id: "msg_1", delta: "OK" }))
+            if (normalized === "tool-calls") {
+              socket.send(
+                JSON.stringify({
+                  type: "response.output_item.added",
+                  output_index: 1,
+                  item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "synthetic_probe" },
+                }),
+              )
+              socket.send(
+                JSON.stringify({
+                  type: "response.function_call_arguments.delta",
+                  item_id: "fc_1",
+                  output_index: 1,
+                  delta: "{}",
+                }),
+              )
+              socket.send(
+                JSON.stringify({
+                  type: "response.output_item.done",
+                  output_index: 1,
+                  item: {
+                    type: "function_call",
+                    id: "fc_1",
+                    call_id: "call_1",
+                    name: "synthetic_probe",
+                    arguments: "{}",
+                  },
+                }),
+              )
+            }
+            socket.send(
+              JSON.stringify({
+                type: reason ? "response.incomplete" : "response.completed",
+                response: {
+                  status: reason ? "incomplete" : "completed",
+                  incomplete_details: reason ? { reason } : null,
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              }),
+            )
+          },
+        },
+      })
+      yield* Effect.addFinalizer(() => Effect.promise(() => server.stop(true)))
+      const aisdk = yield* AISDK.Service
+      yield* aisdk.hook.sdk((event) => {
+        event.sdk = createOpenaiCompatible(event.options)
+      })
+      yield* aisdk.hook.language((event) => {
+        event.language = event.sdk.responses("api-model")
+      })
+      const resolved = yield* aisdk.model({
+        ...model(
+          "@ai-sdk/github-copilot",
+          Provider.modelSettings({
+            baseURL: server.url.origin,
+            apiKey: "test",
+            websocket: true,
+          }),
+        ),
+        providerID: Provider.ID.githubCopilot,
+      })
+      const response = yield* LLMClient.generate(LLM.request({ model: resolved, prompt: "Hello" }), {
+        http: (request, handler) => handler(HttpClientRequest.setHeader(request, "x-hook", "applied")),
+      }).pipe(Effect.provide(client))
+      expect(seen).toEqual(["applied"])
+      expect(requests).toEqual([
+        expect.objectContaining({
+          type: "response.create",
+          model: "api-model",
+          initiator: "user",
+        }),
+      ])
+      expect(requests[0]).not.toHaveProperty("stream")
+      expect(response.finishReason.normalized).toBe(normalized)
+      expect(response.finishReason.raw).toBe(reason ?? undefined)
+      expect(response.events.filter(LLMEvent.is.textDelta).map((event) => event.text)).toEqual(["OK"])
+    }),
+  ),
+)
+
+it.live("replays final-only Copilot reasoning in its original order around text and tool calls", () =>
+  Effect.gen(function* () {
+    const requests: unknown[] = []
+    const events = [
+      { type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: "rs_first" } },
+      { type: "response.reasoning_summary_text.delta", item_id: "rs_first", summary_index: 0, delta: "First" },
+      { type: "response.output_item.done", output_index: 0, item: { type: "reasoning", id: "rs_first_done" } },
+      { type: "response.output_item.added", output_index: 1, item: { type: "message", id: "msg_between" } },
+      { type: "response.output_text.delta", item_id: "msg_between", delta: "Between" },
+      { type: "response.output_item.done", output_index: 1, item: { type: "message", id: "msg_between" } },
+      {
+        type: "response.output_item.added",
+        output_index: 2,
+        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "lookup" },
+      },
+      { type: "response.function_call_arguments.delta", item_id: "fc_1", output_index: 2, delta: "{}" },
+      {
+        type: "response.output_item.done",
+        output_index: 2,
+        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "lookup", arguments: "{}" },
+      },
+      { type: "response.output_item.added", output_index: 3, item: { type: "reasoning", id: "rs_second" } },
+      { type: "response.reasoning_summary_text.delta", item_id: "rs_second", summary_index: 0, delta: "Second" },
+      { type: "response.output_item.done", output_index: 3, item: { type: "reasoning", id: "rs_second_done" } },
+      { type: "response.output_item.added", output_index: 4, item: { type: "message", id: "msg_after" } },
+      { type: "response.output_text.delta", item_id: "msg_after", delta: "After" },
+      { type: "response.output_item.done", output_index: 4, item: { type: "message", id: "msg_after" } },
+      {
+        type: "response.completed",
+        response: {
+          usage: { input_tokens: 1, output_tokens: 1 },
+          output: [
+            { type: "reasoning", id: "rs_first_final", encrypted_content: "first-encrypted-state" },
+            { type: "message", id: "msg_between" },
+            { type: "function_call", id: "fc_1" },
+            { type: "reasoning", id: "rs_second_final", encrypted_content: "second-encrypted-state" },
+            { type: "message", id: "msg_after" },
+          ],
+        },
+      },
+    ]
+    const server = Bun.serve({
+      port: 0,
+      fetch(request, server) {
+        if (server.upgrade(request)) return
+        return new Response("WebSocket required", { status: 400 })
+      },
+      websocket: {
+        message(socket, message) {
+          requests.push(JSON.parse(String(message)))
+          const response =
+            requests.length === 1
+              ? events
+              : [{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } }]
+          response.forEach((event) => socket.send(JSON.stringify(event)))
+        },
+      },
+    })
+    yield* Effect.addFinalizer(() => Effect.promise(() => server.stop(true)))
+    const aisdk = yield* AISDK.Service
+    yield* aisdk.hook.sdk((event) => {
+      event.sdk = createOpenaiCompatible(event.options)
+    })
+    yield* aisdk.hook.language((event) => {
+      event.language = event.sdk.responses("api-model")
+    })
+    const resolved = yield* aisdk.model({
+      ...model("@ai-sdk/github-copilot", Provider.modelSettings({ baseURL: server.url.origin, apiKey: "fixture" })),
+      providerID: Provider.ID.githubCopilot,
+    })
+    const response = yield* LLMClient.generate(LLM.request({ model: resolved, prompt: "Think" })).pipe(
+      Effect.provide(client),
+    )
+    expect(response.reasoning).toBe("FirstSecond")
+    expect(response.text).toBe("BetweenAfter")
+    yield* LLMClient.generate(
+      LLM.request({
+        model: resolved,
+        messages: [
+          response.message,
+          Message.tool({ id: "call_1", name: "lookup", result: { type: "text", value: "Found" } }),
+        ],
+      }),
+    ).pipe(Effect.provide(client))
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toMatchObject({
+      input: [
+        { type: "reasoning", id: "rs_first_final", encrypted_content: "first-encrypted-state", summary: [] },
+        { role: "assistant", content: [{ type: "output_text", text: "Between" }] },
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+        { type: "reasoning", id: "rs_second_final", encrypted_content: "second-encrypted-state", summary: [] },
+        { role: "assistant", content: [{ type: "output_text", text: "After" }] },
+        { type: "function_call_output", call_id: "call_1", output: "Found" },
+      ],
+    })
+  }),
 )
 
 it.effect("rejects native provider compaction rather than silently dropping replay state", () =>
@@ -566,11 +808,19 @@ it.effect("normalizes file data across AI SDK prompt parts", () =>
           Message.user([
             { type: "media", media: Media.bytes(bytes, "image/png"), filename: "bytes.png" },
             { type: "media", media: Media.base64("AAAA", "image/png"), filename: "base64.png" },
-            { type: "media", media: Media.fromDataUrl("data:image/png;charset=utf-8;base64,AQID"), filename: "inline.png" },
+            {
+              type: "media",
+              media: Media.fromDataUrl("data:image/png;charset=utf-8;base64,AQID"),
+              filename: "inline.png",
+            },
             { type: "media", media: Media.url("https://example.com/image.png", { mediaType: "image/png" }) },
             { type: "media", media: Media.base64("s3://bucket/image.png", "image/png") },
           ]),
-          Message.assistant({ type: "media", media: Media.url("http://example.com/document.pdf", { mediaType: "application/pdf" }), filename: "document.pdf" }),
+          Message.assistant({
+            type: "media",
+            media: Media.url("http://example.com/document.pdf", { mediaType: "application/pdf" }),
+            filename: "document.pdf",
+          }),
           Message.tool({
             id: "call_1",
             name: "screenshot",
@@ -753,12 +1003,7 @@ it.effect("routes AI SDK requests and responses through HTTP hook middleware", (
     expect(sent[0]?.headers.get("x-hook")).toBe("applied")
     expect(sent[0]?.headers.get("authorization")).toBe("Bearer test")
     expect(JSON.parse(sent[0]?.body ?? "")).toMatchObject({ model: "api-model" })
-    expect(seen).toEqual([
-      "POST https://example.test/v1/chat/completions",
-      sent[0]?.body,
-      sent[0]?.body,
-      "status 200",
-    ])
+    expect(seen).toEqual(["POST https://example.test/v1/chat/completions", sent[0]?.body, sent[0]?.body, "status 200"])
     expect(response.events.filter(LLMEvent.is.textDelta).map((event) => event.text)).toEqual(["rewritten"])
   }),
 )

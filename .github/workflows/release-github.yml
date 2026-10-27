@@ -94,10 +94,10 @@ jobs:
         if: matrix.platform == 'linux-x64'
         run: bun run check
 
-      - name: Test update and install behavior
+      - name: Test update, install and Copilot transport behavior
         run: |
           bun run --cwd packages/cli test src/services/updater.test.ts test/updater-install.test.ts test/github-updater.test.ts test/github-installer.test.ts
-          GITHUB_ACTIONS=false bun run --cwd packages/ai test test/provider/github-copilot-responses.test.ts
+          GITHUB_ACTIONS=false bun run --cwd packages/core test test/github-copilot test/aisdk.test.ts test/plugin/provider-github-copilot.test.ts test/model-resolver.test.ts
 
       - name: Build and package native executables with web UI
         working-directory: packages/cli

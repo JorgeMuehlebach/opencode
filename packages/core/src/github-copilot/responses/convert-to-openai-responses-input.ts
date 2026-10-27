@@ -1,4 +1,9 @@
-import { type LanguageModelV3Prompt, type SharedV3Warning, UnsupportedFunctionalityError } from "@ai-sdk/provider"
+import {
+  type LanguageModelV3Prompt,
+  type LanguageModelV3ReasoningPart,
+  type SharedV3Warning,
+  UnsupportedFunctionalityError,
+} from "@ai-sdk/provider"
 import { convertToBase64, parseProviderOptions } from "@ai-sdk/provider-utils"
 import { z } from "zod/v4"
 import type { OpenAIResponsesInput, OpenAIResponsesReasoning } from "./openai-responses-api-types.js"
@@ -111,6 +116,26 @@ export async function convertToOpenAIResponsesInput({
 
       case "assistant": {
         const reasoningMessages: Record<string, OpenAIResponsesReasoning> = {}
+        const reasoningOptions = new Map<
+          LanguageModelV3ReasoningPart,
+          OpenAIResponsesReasoningProviderOptions | undefined
+        >()
+        const reasoningUpdates = new Map<string, OpenAIResponsesReasoningProviderOptions>()
+        for (const part of content) {
+          if (part.type !== "reasoning") continue
+          const options = await parseProviderOptions({
+            provider: "copilot",
+            providerOptions: part.providerOptions,
+            schema: openaiResponsesReasoningProviderOptionsSchema,
+          })
+          reasoningOptions.set(part, options)
+          if (
+            options?.reasoningOriginalItemId != null &&
+            options.itemId != null &&
+            options.reasoningEncryptedContent != null
+          )
+            reasoningUpdates.set(options.reasoningOriginalItemId, options)
+        }
 
         for (const part of content) {
           switch (part.type) {
@@ -153,11 +178,11 @@ export async function convertToOpenAIResponsesInput({
             }
 
             case "reasoning": {
-              const providerOptions = await parseProviderOptions({
-                provider: "copilot",
-                providerOptions: part.providerOptions,
-                schema: openaiResponsesReasoningProviderOptionsSchema,
-              })
+              const options = reasoningOptions.get(part)
+              const originalId = options?.reasoningOriginalItemId ?? options?.itemId
+              // Completion-only payloads arrive after text or tools; replay them where their
+              // original reasoning appeared instead of moving that state to the end of the message.
+              const providerOptions = originalId == null ? options : (reasoningUpdates.get(originalId) ?? options)
 
               const reasoningId = providerOptions?.itemId
 
@@ -269,6 +294,7 @@ export async function convertToOpenAIResponsesInput({
 
 const openaiResponsesReasoningProviderOptionsSchema = z.object({
   itemId: z.string().nullish(),
+  reasoningOriginalItemId: z.string().nullish(),
   reasoningEncryptedContent: z.string().nullish(),
 })
 

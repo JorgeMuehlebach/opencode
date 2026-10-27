@@ -1,5 +1,6 @@
 import {
   APICallError,
+  InvalidResponseDataError,
   type JSONValue,
   type LanguageModelV3,
   type LanguageModelV3CallOptions,
@@ -88,6 +89,12 @@ const imageGenerationCallItem = z.object({
   type: z.literal("image_generation_call"),
   id: z.string(),
   result: z.string(),
+})
+
+const reasoningItem = z.object({
+  type: z.literal("reasoning"),
+  id: z.string(),
+  encrypted_content: z.string().nullish(),
 })
 
 /**
@@ -739,10 +746,12 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
       number,
       {
         canonicalId: string // the item.id from output_item.added
+        itemId: string
         encryptedContent?: string | null
         summaryParts: Record<number, "active" | "can-conclude" | "concluded">
       }
     > = {}
+    const completedReasoning = new Set<number>()
 
     // Track current active reasoning output_index for correlating summary events
     let currentReasoningOutputIndex: number | null = null
@@ -752,6 +761,31 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
     let currentTextId: string | null = null
 
     let serviceTier: string | undefined
+    let lastEventType: string | undefined
+    let responseFinished = false
+
+    function endReasoning(
+      controller: TransformStreamDefaultController<LanguageModelV3StreamPart>,
+      outputIndex: number,
+    ) {
+      const activeItem = activeReasoning[outputIndex]
+      for (const [summaryIndex, status] of Object.entries(activeItem.summaryParts)) {
+        if (status === "concluded") continue
+        controller.enqueue({
+          type: "reasoning-end",
+          id: `${activeItem.canonicalId}:${summaryIndex}`,
+          providerMetadata: {
+            copilot: {
+              itemId: activeItem.itemId,
+              reasoningOriginalItemId: activeItem.canonicalId,
+              reasoningEncryptedContent: activeItem.encryptedContent ?? null,
+            },
+          },
+        })
+        activeItem.summaryParts[Number(summaryIndex)] = "concluded"
+        if (activeItem.encryptedContent != null) completedReasoning.add(outputIndex)
+      }
+    }
 
     return {
       stream: response.pipeThrough(
@@ -776,6 +810,7 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
             }
 
             const value = chunk.value
+            lastEventType = value.type
 
             if (isResponseOutputItemAddedChunk(value)) {
               if (value.item.type === "function_call") {
@@ -860,8 +895,10 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
                   currentReasoningOutputIndex = value.output_index
                   return
                 }
+                for (const outputIndex of Object.keys(activeReasoning)) endReasoning(controller, Number(outputIndex))
                 activeReasoning[value.output_index] = {
                   canonicalId: value.item.id,
+                  itemId: value.item.id,
                   encryptedContent: value.item.encrypted_content,
                   summaryParts: { 0: "active" },
                 }
@@ -996,23 +1033,16 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
               } else if (isResponseOutputItemDoneReasoningChunk(value)) {
                 const activeReasoningPart = activeReasoning[value.output_index]
                 if (activeReasoningPart) {
-                  for (const [summaryIndex, status] of Object.entries(activeReasoningPart.summaryParts)) {
-                    if (status === "concluded") continue
-                    controller.enqueue({
-                      type: "reasoning-end",
-                      id: `${activeReasoningPart.canonicalId}:${summaryIndex}`,
-                      providerMetadata: {
-                        copilot: {
-                          itemId: value.item.id,
-                          reasoningEncryptedContent: value.item.encrypted_content ?? null,
-                        },
-                      },
-                    })
-                  }
-                  delete activeReasoning[value.output_index]
+                  activeReasoningPart.itemId = value.item.id
+                  activeReasoningPart.encryptedContent =
+                    value.item.encrypted_content ?? activeReasoningPart.encryptedContent
                   if (currentReasoningOutputIndex === value.output_index) {
                     currentReasoningOutputIndex = null
                   }
+                  // Copilot can provide the replay payload only in the final response snapshot.
+                  // Keep the last summary open so it receives that metadata exactly once.
+                  if (body.store === false && activeReasoningPart.encryptedContent == null) return
+                  endReasoning(controller, value.output_index)
                 }
               }
             } else if (isResponseFunctionCallArgumentsDeltaChunk(value)) {
@@ -1166,6 +1196,39 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
                 })
               }
             } else if (isResponseFinishedChunk(value)) {
+              responseFinished = true
+              responseId = value.response.id ?? responseId
+              value.response.output?.forEach((item, outputIndex) => {
+                if (!isReasoningItem(item) || completedReasoning.has(outputIndex)) return
+                const activeItem = activeReasoning[outputIndex]
+                if (activeItem) {
+                  activeItem.itemId = item.id
+                  activeItem.encryptedContent = item.encrypted_content ?? activeItem.encryptedContent
+                }
+              })
+              for (const outputIndex of Object.keys(activeReasoning)) endReasoning(controller, Number(outputIndex))
+              value.response.output?.forEach((item, outputIndex) => {
+                if (!isReasoningItem(item) || completedReasoning.has(outputIndex)) return
+                if (body.store !== false || item.encrypted_content == null) return
+                // Earlier summaries may already have closed before another reasoning item began.
+                // A separate empty part retains their final encrypted state without reopening an ID.
+                const id = `${item.id}:${activeReasoning[outputIndex] ? "final" : "0"}`
+                controller.enqueue({ type: "reasoning-start", id })
+                controller.enqueue({
+                  type: "reasoning-end",
+                  id,
+                  providerMetadata: {
+                    copilot: {
+                      itemId: item.id,
+                      reasoningEncryptedContent: item.encrypted_content,
+                      ...(activeReasoning[outputIndex] && {
+                        reasoningOriginalItemId: activeReasoning[outputIndex].canonicalId,
+                      }),
+                    },
+                  },
+                })
+                completedReasoning.add(outputIndex)
+              })
               finishReason = {
                 unified: mapOpenAIResponseFinishReason({
                   finishReason: value.response.incomplete_details?.reason,
@@ -1173,11 +1236,13 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
                 }),
                 raw: value.response.incomplete_details?.reason ?? undefined,
               }
-              usage.inputTokens = value.response.usage.input_tokens
-              usage.outputTokens = value.response.usage.output_tokens
-              usage.totalTokens = value.response.usage.input_tokens + value.response.usage.output_tokens
-              usage.reasoningTokens = value.response.usage.output_tokens_details?.reasoning_tokens ?? undefined
-              usage.cachedInputTokens = value.response.usage.input_tokens_details?.cached_tokens ?? undefined
+              if (value.response.usage) {
+                usage.inputTokens = value.response.usage.input_tokens
+                usage.outputTokens = value.response.usage.output_tokens
+                usage.totalTokens = value.response.usage.input_tokens + value.response.usage.output_tokens
+                usage.reasoningTokens = value.response.usage.output_tokens_details?.reasoning_tokens ?? undefined
+                usage.cachedInputTokens = value.response.usage.input_tokens_details?.cached_tokens ?? undefined
+              }
               if (typeof value.response.service_tier === "string") {
                 serviceTier = value.response.service_tier
               }
@@ -1200,8 +1265,22 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
                   filename: value.annotation.filename ?? value.annotation.file_id,
                 })
               }
-            } else if (isErrorChunk(value)) {
-              controller.enqueue({ type: "error", error: value })
+            } else if (isResponseFailedChunk(value) || isErrorChunk(value)) {
+              responseFinished = true
+              finishReason = { unified: "error", raw: undefined }
+              const error = isResponseFailedChunk(value) ? value.response.error : (value.error ?? value)
+              controller.enqueue({
+                type: "error",
+                error: new APICallError({
+                  message: error?.message ?? "Copilot response failed",
+                  url: self.config.url({ path: "/responses", modelId: self.modelId }),
+                  requestBodyValues: body,
+                  responseHeaders,
+                  responseBody: JSON.stringify({ error }),
+                  data: { error },
+                  isRetryable: false,
+                }),
+              })
             }
           },
 
@@ -1211,16 +1290,7 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
               controller.enqueue({ type: "text-end", id: currentTextId })
               currentTextId = null
             }
-            for (const activeItem of Object.values(activeReasoning)) {
-              for (const [summaryIndex, status] of Object.entries(activeItem.summaryParts)) {
-                if (status === "concluded") continue
-                controller.enqueue({
-                  type: "reasoning-end",
-                  id: `${activeItem.canonicalId}:${summaryIndex}`,
-                  providerMetadata: { copilot: { itemId: activeItem.canonicalId } },
-                })
-              }
-            }
+            for (const outputIndex of Object.keys(activeReasoning)) endReasoning(controller, Number(outputIndex))
 
             const providerMetadata: SharedV3ProviderMetadata = {
               copilot: {
@@ -1234,6 +1304,19 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
 
             if (serviceTier !== undefined) {
               providerMetadata.copilot.serviceTier = serviceTier
+            }
+
+            if (!responseFinished && finishReason.unified !== "error") {
+              controller.enqueue({
+                type: "error",
+                error: new InvalidResponseDataError({
+                  message:
+                    "Copilot Responses stream ended without response.completed or response.incomplete " +
+                    `(last event: ${lastEventType ?? "none"}).`,
+                  data: providerMetadata.copilot,
+                }),
+              })
+              return
             }
 
             controller.enqueue({
@@ -1287,17 +1370,43 @@ const textDeltaChunkSchema = z.object({
 
 const errorChunkSchema = z.object({
   type: z.literal("error"),
-  code: z.string(),
-  message: z.string(),
+  code: z.union([z.string(), z.number()]).nullish(),
+  message: z.string().optional(),
   param: z.string().nullish(),
-  sequence_number: z.number(),
+  sequence_number: z.number().optional(),
+  error: z
+    .object({
+      code: z.union([z.string(), z.number()]).nullish(),
+      message: z.string(),
+      type: z.string().nullish(),
+      param: z.string().nullish(),
+    })
+    .nullish(),
+})
+
+const responseFailedChunkSchema = z.object({
+  type: z.literal("response.failed"),
+  response: z.object({
+    error: z
+      .object({
+        code: z.union([z.string(), z.number()]).nullish(),
+        message: z.string(),
+        type: z.string().nullish(),
+        param: z.string().nullish(),
+      })
+      .nullish(),
+  }),
 })
 
 const responseFinishedChunkSchema = z.object({
   type: z.enum(["response.completed", "response.incomplete"]),
   response: z.object({
+    id: z.string().optional(),
     incomplete_details: z.object({ reason: z.string() }).nullish(),
-    usage: usageSchema,
+    usage: usageSchema.nullish(),
+    output: z
+      .array(z.union([reasoningItem, z.object({ type: z.string() }).refine((item) => item.type !== "reasoning")]))
+      .nullish(),
     service_tier: z.string().nullish(),
   }),
 })
@@ -1320,17 +1429,13 @@ const responseOutputItemAddedSchema = z.object({
       type: z.literal("message"),
       id: z.string(),
     }),
-    z.object({
-      type: z.literal("reasoning"),
-      id: z.string(),
-      encrypted_content: z.string().nullish(),
-    }),
+    reasoningItem,
     z.object({
       type: z.literal("function_call"),
       id: z.string(),
       call_id: z.string(),
       name: z.string(),
-      arguments: z.string(),
+      arguments: z.string().optional(),
     }),
     z.object({
       type: z.literal("web_search_call"),
@@ -1382,18 +1487,14 @@ const responseOutputItemDoneSchema = z.object({
       type: z.literal("message"),
       id: z.string(),
     }),
-    z.object({
-      type: z.literal("reasoning"),
-      id: z.string(),
-      encrypted_content: z.string().nullish(),
-    }),
+    reasoningItem,
     z.object({
       type: z.literal("function_call"),
       id: z.string(),
       call_id: z.string(),
       name: z.string(),
       arguments: z.string(),
-      status: z.literal("completed"),
+      status: z.string().optional(),
     }),
     codeInterpreterCallItem,
     imageGenerationCallItem,
@@ -1489,10 +1590,56 @@ const openaiResponsesChunkSchema = z.union([
   responseReasoningSummaryPartDoneSchema,
   responseReasoningSummaryTextDeltaSchema,
   errorChunkSchema,
-  z.object({ type: z.string() }).loose(), // fallback for unknown chunks
+  responseFailedChunkSchema,
+  z
+    .object({ type: z.string() })
+    .loose()
+    .refine(
+      (chunk) => {
+        if (chunk.type === "response.output_item.added" || chunk.type === "response.output_item.done") {
+          const output = z.object({ item: z.object({ type: z.string() }) }).safeParse(chunk)
+          return (
+            output.success &&
+            ![
+              "message",
+              "reasoning",
+              "function_call",
+              "web_search_call",
+              "computer_call",
+              "file_search_call",
+              "image_generation_call",
+              "code_interpreter_call",
+            ].includes(output.data.item.type)
+          )
+        }
+        return ![
+          "response.output_text.delta",
+          "response.completed",
+          "response.incomplete",
+          "response.failed",
+          "response.created",
+          "response.output_item.added",
+          "response.output_item.done",
+          "response.function_call_arguments.delta",
+          "response.image_generation_call.partial_image",
+          "response.code_interpreter_call_code.delta",
+          "response.code_interpreter_call_code.done",
+          "response.output_text.annotation.added",
+          "response.reasoning_summary_part.added",
+          "response.reasoning_summary_part.done",
+          "response.reasoning_summary_text.delta",
+          "error",
+        ].includes(chunk.type)
+      },
+      { message: "Malformed Copilot Responses event" },
+    ),
 ])
 
 type ExtractByType<T, K extends T extends { type: infer U } ? U : never> = T extends { type: K } ? T : never
+
+function isReasoningItem(item: { type: string }): item is z.infer<typeof reasoningItem> {
+  return item.type === "reasoning"
+}
 
 function isTextDeltaChunk(
   chunk: z.infer<typeof openaiResponsesChunkSchema>,
@@ -1518,6 +1665,12 @@ function isResponseFinishedChunk(
   chunk: z.infer<typeof openaiResponsesChunkSchema>,
 ): chunk is z.infer<typeof responseFinishedChunkSchema> {
   return chunk.type === "response.completed" || chunk.type === "response.incomplete"
+}
+
+function isResponseFailedChunk(
+  chunk: z.infer<typeof openaiResponsesChunkSchema>,
+): chunk is z.infer<typeof responseFailedChunkSchema> {
+  return chunk.type === "response.failed"
 }
 
 function isResponseCreatedChunk(

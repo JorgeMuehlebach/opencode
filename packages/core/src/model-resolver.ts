@@ -202,6 +202,19 @@ const resolveCatalogModel = Effect.fn("ModelResolver.resolveCatalogModel")(funct
 ) {
   const resolved = prepareRuntimeModel(model)
   const configured = { ...resolved.settings, ...credential?.metadata }
+  if (
+    resolved.providerID === Provider.ID.githubCopilot &&
+    resolved.package === "@opencode/ai/providers/anthropic" &&
+    resolved.settings?.transport !== "http" &&
+    resolved.settings?.websocket !== false
+  )
+    return yield* new ModelConfigurationError({
+      providerID: resolved.providerID,
+      modelID: resolved.id,
+      package: resolved.package,
+      detail:
+        'This Copilot model uses Anthropic Messages over HTTPS. Select a Responses model for WebSockets or explicitly set providers.github-copilot.settings.transport to "http".',
+    })
   if (Provider.isAISDK(resolved.package)) {
     const loadAISDK = dependencies?.loadAISDK
     if (!loadAISDK) return yield* unsupported(resolved)
@@ -295,7 +308,8 @@ function prepareProviderURL(
   const prepared = baseURL.replace(
     /\$\{([^}]+)\}/g,
     (placeholder, name: string) =>
-      (name === "AWS_REGION" && typeof settings.region === "string" ? settings.region : process.env[name]) ?? placeholder,
+      (name === "AWS_REGION" && typeof settings.region === "string" ? settings.region : process.env[name]) ??
+      placeholder,
   )
   const failure = unresolvedProviderVariables(model, prepared)
   return failure ? Effect.fail(failure) : Effect.succeed(prepared)

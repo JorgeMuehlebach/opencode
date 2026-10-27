@@ -1,150 +1,145 @@
 import { describe, expect } from "bun:test"
 import { LLM, Message } from "@opencode/ai/effect"
-import { LLMClient, RequestExecutor, WebSocketTransport } from "@opencode/ai/route"
+import { LLMClient, RequestExecutor } from "@opencode/ai/route"
+import { AISDK } from "@opencode/core/aisdk"
 import { Credential } from "@opencode/core/credential"
-import { WebSocketConstructor } from "@opencode/core/effect/websocket-constructor"
 import { CopilotModels } from "@opencode/core/github-copilot/models"
 import { Integration } from "@opencode/core/integration"
 import { Model } from "@opencode/core/model"
 import { ModelResolver } from "@opencode/core/model-resolver"
-import { SessionModelTransport } from "@opencode/core/session/model-transport"
-import { Session } from "@opencode/schema/session"
-import { Effect, Layer, Schema } from "effect"
-import { Socket } from "effect/socket"
-import { it } from "../lib/effect"
+import { Plugin } from "@opencode/core/plugin"
+import { PluginHost } from "@opencode/core/plugin/host"
+import { GithubCopilotPlugin } from "@opencode/core/plugin/provider/github-copilot"
+import { Effect, Layer, Schema, Struct } from "effect"
+import { testEffect } from "../lib/effect"
 import { makeWebSocketServer } from "../lib/websocket-server"
+import { PluginTestLayer } from "../plugin/fixture"
 
-const response = (index: number) => {
-  const item = {
-    type: "message",
-    id: `msg_${index}`,
-    role: "assistant",
-    status: "completed",
-    content: [{ type: "output_text", text: `Reply ${index}`, annotations: [] }],
-  }
-  return [
-    { type: "response.created", response: { id: `resp_${index}` } },
-    { type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
-    { type: "response.output_text.delta", item_id: item.id, output_index: 0, delta: `Reply ${index}` },
-    { type: "response.output_text.done", item_id: item.id, output_index: 0, text: `Reply ${index}` },
-    { type: "response.output_item.done", output_index: 0, item },
-    { type: "response.completed", response: { id: `resp_${index}`, output: [item] } },
-  ]
-}
+const it = testEffect(PluginTestLayer)
+const decodeBody = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))
+const client = LLMClient.layer.pipe(
+  Layer.provide(
+    Layer.succeed(
+      RequestExecutor.Service,
+      RequestExecutor.Service.of({ execute: () => Effect.die("Unexpected native HTTP request") }),
+    ),
+  ),
+)
 
-describe("Copilot catalog to session transport", () => {
-  for (const upgrade of [true, false]) {
-    it.live(
-      upgrade
-        ? "continues the advertised WebSocket route"
-        : "falls back to authenticated HTTP after a rejected upgrade",
-      () =>
-        Effect.gen(function* () {
-          const bodies: Array<Record<string, unknown>> = []
-          const httpHeaders: Array<Record<string, string>> = []
-          const server = yield* makeWebSocketServer({
-            upgrade: () => upgrade,
-            http: async (request) => {
-              if (new URL(request.url).pathname === "/models")
-                return Response.json({
-                  data: [
-                    {
-                      id: "gpt-6.1-sol",
-                      name: "Sol",
-                      version: "2026-10-01",
-                      model_picker_enabled: true,
-                      supported_endpoints: ["/responses", "ws:/responses"],
-                      capabilities: {
-                        family: "gpt",
-                        limits: { max_prompt_tokens: 200000, max_output_tokens: 32000 },
-                        supports: { tool_calls: true },
-                      },
+const response = (index: number) => [
+  { type: "response.created", response: { id: `resp_${index}`, created_at: 1, model: "fixture" } },
+  { type: "response.output_text.delta", item_id: `msg_${index}`, delta: `Reply ${index}` },
+  {
+    type: "response.completed",
+    response: { id: `resp_${index}`, status: "completed", usage: { input_tokens: 1, output_tokens: 1 } },
+  },
+]
+
+describe("Copilot catalog to SDK WebSocket bridge", () => {
+  for (const mode of ["websocket", "rejected", "http"] as const) {
+    it.live(`uses ${mode} policy without changing transport`, () =>
+      Effect.gen(function* () {
+        const bodies: Array<Record<string, unknown>> = []
+        const httpHeaders: Array<Record<string, string>> = []
+        const server = yield* makeWebSocketServer({
+          upgrade: () => mode !== "rejected",
+          http: async (request) => {
+            if (new URL(request.url).pathname === "/models")
+              return Response.json({
+                data: [
+                  {
+                    id: "gpt-6.1-sol",
+                    name: "Sol",
+                    version: "2026-10-01",
+                    model_picker_enabled: true,
+                    supported_endpoints: ["/responses", "ws:/responses"],
+                    capabilities: {
+                      family: "gpt",
+                      limits: { max_prompt_tokens: 200000, max_output_tokens: 32000 },
+                      supports: { tool_calls: true },
                     },
-                  ],
-                })
-              httpHeaders.push(Object.fromEntries(request.headers))
-              bodies.push(Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(await request.json()))
-              return new Response(
-                response(bodies.length)
-                  .map((event) => `data: ${JSON.stringify(event)}\n\n`)
-                  .join(""),
-                {
-                  headers: { "content-type": "text/event-stream" },
-                },
-              )
+                  },
+                ],
+              })
+            httpHeaders.push(Object.fromEntries(request.headers))
+            bodies.push(decodeBody(await request.json()))
+            return new Response(
+              response(bodies.length)
+                .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+                .join(""),
+              {
+                headers: { "content-type": "text/event-stream" },
+              },
+            )
+          },
+          message: (socket, message) => {
+            bodies.push(decodeBody(JSON.parse(message.toString())))
+            response(bodies.length).forEach((event) => socket.send(JSON.stringify(event)))
+          },
+        })
+        const baseURL = server.url.replace(/^ws/, "http").replace(/\/responses$/, "")
+        const models = yield* Effect.promise(() => CopilotModels.get(baseURL, {}, []))
+        const info = models.get(Model.ID.make("gpt-6.1-sol"))
+        if (!info) throw new Error("Expected advertised Copilot model")
+        const plugin = yield* Plugin.Service
+        const host = yield* PluginHost.make(plugin)
+        yield* GithubCopilotPlugin.effect(host)
+        const aisdk = yield* AISDK.Service
+        const model = yield* ModelResolver.fromCatalogModel(
+          // No cached WebSocket capability flag: the policy still applies if discovery was unavailable.
+          {
+            ...info,
+            settings: {
+              ...Struct.omit(info.settings ?? {}, ["websocket"]),
+              ...(mode === "http" ? { transport: "http" } : {}),
             },
-            message: (socket, message) => {
-              bodies.push(JSON.parse(message.toString()))
-              response(bodies.length).forEach((event) => socket.send(JSON.stringify(event)))
-            },
-          })
-          const baseURL = server.url.replace(/^ws/, "http").replace(/\/responses$/, "")
-          const models = yield* Effect.promise(() => CopilotModels.get(baseURL, {}, []))
-          const info = models.get(Model.ID.make("gpt-6.1-sol"))
-          if (!info) throw new Error("Expected advertised Copilot model")
-          const model = yield* ModelResolver.fromCatalogModel(
-            info,
-            Credential.OAuth.make({
-              type: "oauth",
-              methodID: Integration.MethodID.make("device"),
-              access: "fixture-copilot-token",
-              refresh: "fixture-copilot-token",
-              expires: 0,
-            }),
-          )
-          const transport = yield* SessionModelTransport.Service
-          const options = { webSocket: transport.bind(Session.ID.make("ses_copilot_socket")) }
-          const llm = yield* LLMClient.Service
-          const first = yield* llm.generate(LLM.request({ model, prompt: "First" }), options)
-          const second = yield* llm.generate(
-            LLM.request({
-              model,
-              messages: [Message.user("First"), first.message, Message.user("Second")],
-            }),
-            options,
-          )
-
-          expect(first.text).toBe("Reply 1")
-          expect(second.text).toBe("Reply 2")
-          expect(model.route.providerMetadataKey).toBe("copilot")
-          const handshakes = server.state.headers.filter((headers) => headers.upgrade === "websocket")
-          expect(handshakes).toHaveLength(1)
-          expect(handshakes[0]?.authorization).toBe("Bearer fixture-copilot-token")
+          },
+          Credential.OAuth.make({
+            type: "oauth",
+            methodID: Integration.MethodID.make("device"),
+            access: "fixture-copilot-token",
+            refresh: "fixture-copilot-token",
+            expires: 0,
+          }),
+          { loadAISDK: (model) => aisdk.model(model) },
+        )
+        const llm = yield* LLMClient.Service
+        if (mode === "rejected") {
+          const first = yield* llm.generate(LLM.request({ model, prompt: "First" })).pipe(Effect.flip)
+          const second = yield* llm.generate(LLM.request({ model, prompt: "Second" })).pipe(Effect.flip)
+          expect(first.message).toContain("WebSocket")
+          expect(second.message).toContain("WebSocket")
+          expect(httpHeaders).toHaveLength(0)
+          expect(bodies).toHaveLength(0)
+          expect(server.state.headers.filter((headers) => headers.upgrade === "websocket")).toHaveLength(2)
+          return
+        }
+        const first = yield* llm.generate(LLM.request({ model, prompt: "First" }))
+        const second = yield* llm.generate(
+          LLM.request({ model, messages: [Message.user("First"), first.message, Message.user("Second")] }),
+        )
+        expect(first.text).toBe("Reply 1")
+        expect(second.text).toBe("Reply 2")
+        expect(model.route.providerMetadataKey).toBe("copilot")
+        const handshakes = server.state.headers.filter((headers) => headers.upgrade === "websocket")
+        if (mode === "websocket") {
+          expect(handshakes).toHaveLength(2)
+          expect(handshakes.every((headers) => headers.authorization === "Bearer fixture-copilot-token")).toBe(true)
           expect(handshakes[0]?.["x-github-api-version"]).toBe("2026-08-01")
-          if (upgrade) {
-            expect(server.state.opens).toBe(1)
-            expect(httpHeaders).toHaveLength(0)
-            expect(bodies[1]).toMatchObject({
-              type: "response.create",
-              initiator: "user",
-              previous_response_id: "resp_1",
-              input: [{ role: "user", content: [{ type: "input_text", text: "Second" }] }],
-            })
-            return
-          }
-          expect(server.state.opens).toBe(0)
+          expect(server.state.opens).toBe(2)
+          expect(httpHeaders).toHaveLength(0)
+          expect(bodies[1]).toMatchObject({ type: "response.create", initiator: "user", store: false })
+          expect(bodies[1]?.stream).toBeUndefined()
+        }
+        if (mode === "http") {
+          expect(handshakes).toHaveLength(0)
           expect(httpHeaders).toHaveLength(2)
           expect(httpHeaders.every((headers) => headers.authorization === "Bearer fixture-copilot-token")).toBe(true)
-          expect(httpHeaders.every((headers) => headers["x-initiator"] === "user")).toBe(true)
-          expect(bodies[1]?.previous_response_id).toBeUndefined()
-          expect(bodies[1]?.input).toHaveLength(3)
-        }).pipe(
-          Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.fetchLayer))),
-          Effect.provide(
-            Layer.unwrap(
-              Effect.gen(function* () {
-                const constructor = yield* Socket.WebSocketConstructor
-                return SessionModelTransport.makeLayer({
-                  open: (input) =>
-                    WebSocketTransport.open(input).pipe(
-                      Effect.provideService(Socket.WebSocketConstructor, constructor),
-                    ),
-                })
-              }),
-            ),
-          ),
-          Effect.provide(WebSocketConstructor.layer),
-        ),
+          expect(bodies[1]?.stream).toBe(true)
+        }
+        expect(bodies[1]?.previous_response_id).toBeUndefined()
+        expect(bodies[1]?.input).toHaveLength(3)
+      }).pipe(Effect.provide(client)),
     )
   }
 })
