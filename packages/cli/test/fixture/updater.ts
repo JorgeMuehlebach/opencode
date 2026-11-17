@@ -4,12 +4,16 @@ import { Global } from "@opencode/util/global"
 import { AppProcess } from "@opencode/util/process"
 import { spyOn } from "bun:test"
 import { Effect, FileSystem, Layer, PlatformError, Stream } from "effect"
-import { ChildProcess, ChildProcessSpawner } from "effect/process"
+import { ChildProcessSpawner } from "effect/process"
+import { writeFileSync } from "node:fs"
 import path from "node:path"
 import { Updater } from "../../src/services/updater"
 
 export function fixture(
-  respond: (command: ChildProcess.StandardCommand) => Partial<AppProcess.RunResult> & {
+  respond: (command: {
+    readonly command: string
+    readonly args: ReadonlyArray<string>
+  }) => Partial<AppProcess.RunResult> & {
     error?: AppProcess.AppProcessError
   } = () => ({}),
   name = "@opencode/cli",
@@ -27,17 +31,18 @@ export function fixture(
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const root = yield* fs.makeTempDirectoryScoped({ prefix: "opencode-updater-" })
     const execPath = process.execPath
-    const modules = path.join(root, "node_modules")
+    // npm's global layout on POSIX.
+    const modules = path.join(root, "lib", "node_modules")
     const executable = executableOverride
       ? yield* executableOverride(root, path.join(root, "home"))
       : formula
         ? path.join(root, "Cellar", formula, "2.0.20", "bin", "opencode")
-        : path.join(modules, "@opencode", "cli", "bin", "opencode")
+        : path.join(modules, ...name.split("/"), "bin", "opencode")
     yield* fs.makeDirectory(path.dirname(executable), { recursive: true })
     yield* fs.writeFileString(executable, "binary")
     if (!formula && !executableOverride)
       yield* fs.writeFileString(
-        path.join(modules, "@opencode", "cli", "package.json"),
+        path.join(modules, ...name.split("/"), "package.json"),
         JSON.stringify({ name, bin: { opencode: "bin/opencode" } }),
       )
     const requests: string[] = []
@@ -78,6 +83,8 @@ export function fixture(
       yield* fs.writeFileString(bash, "bash")
     }
     const commands: string[][] = []
+    const paths: Array<string | undefined> = []
+    const manifest = path.join(modules, ...name.split("/"), "package.json")
     const updater = yield* Updater.Service.pipe(
       Effect.provide(Updater.layer),
       Effect.provide(
@@ -108,12 +115,18 @@ export function fixture(
           run: (command) =>
             Effect.suspend(() => {
               if (command._tag !== "StandardCommand") return Effect.die("Unexpected piped install command")
-              const lookup = command.command === "git" && command.args[0] === "--exec-path"
-              if (!lookup) commands.push([command.command, ...command.args])
+              const args = command.args.map(String)
+              const lookup = command.command === "git" && args[0] === "--exec-path"
+              if (!lookup) commands.push([command.command, ...args])
+              if (!lookup) paths.push(command.options.env?.PATH?.toString())
               const result = lookup
                 ? { stdout: Buffer.from(`${path.join(git, "mingw64", "libexec", "git-core")}\n`) }
-                : respond(command)
+                : respond({ command: command.command, args })
               if (result.error) return Effect.fail(result.error)
+              // Successful installs replace the running copy, which the updater verifies afterwards.
+              const installed = args.find((arg) => arg.startsWith(`${name}@`))?.slice(name.length + 1)
+              if (!formula && !executableOverride && installed && (result.exitCode ?? 0) === 0)
+                writeFileSync(manifest, JSON.stringify({ name, version: installed, bin: { opencode: "bin/opencode" } }))
               return Effect.succeed({
                 command: command.command,
                 exitCode: 0,
@@ -128,6 +141,9 @@ export function fixture(
         }),
       ),
     )
-    return { updater, commands, requests, global, fs, executable, bash }
+    const prefix = yield* fs.realPath(root)
+    // Windows keeps the npm on PATH and its default prefix.
+    const prefixArgs = process.platform === "win32" ? [] : ["--prefix", prefix]
+    return { updater, commands, paths, requests, global, fs, executable, bash, prefix, prefixArgs }
   })
 }

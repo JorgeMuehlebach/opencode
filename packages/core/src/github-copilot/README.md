@@ -38,6 +38,10 @@ A custom `fetch` implementation is supported for HTTPS routes. Responses models
 using WebSockets require an explicit HTTP override before using custom fetch; it
 cannot silently replace a failed WebSocket connection.
 
+Per-provider `tls` client certificates also require an explicit `transport: "http"`
+for Responses models. The WebSocket bridge reports an unsupported configuration
+instead of changing transports.
+
 WebSocket connections use OpenCode's platform constructor, including `WSS_PROXY`,
 `HTTPS_PROXY`, `WS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`. Runtime trust
 settings remain in effect. The SDK parser preserves structured provider errors,

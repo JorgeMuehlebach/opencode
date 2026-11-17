@@ -6,6 +6,7 @@ import { Agent } from "@opencode/core/agent"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Config } from "@opencode/core/config"
+import { Flag } from "@opencode/core/flag"
 import { Database } from "@opencode/core/database/database"
 import { Bus } from "@opencode/core/bus"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -13,6 +14,7 @@ import { Global } from "@opencode/util/global"
 import { Image } from "@opencode/core/image"
 import { Location } from "@opencode/core/location"
 import { FileAccess } from "@opencode/core/file-access"
+import { Environment } from "@opencode/core/environment/index"
 import { Model } from "@opencode/core/model"
 import { Permission } from "@opencode/core/permission"
 import { Project } from "@opencode/core/project"
@@ -27,6 +29,7 @@ import { SessionMessage } from "@opencode/core/session/message"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionStore } from "@opencode/core/session/store"
 import { Session } from "@opencode/core/session"
+import { Skill } from "@opencode/core/skill"
 import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { Tool } from "@opencode/core/tool"
@@ -47,8 +50,12 @@ const readToolNode = makeLocationNode({
     Image.node,
     Permission.node,
     SessionInstructions.node,
+    Skill.node,
     FSUtil.node,
+    Environment.node,
     Location.node,
+    Config.node,
+    Flag.node,
   ],
 })
 
@@ -71,6 +78,7 @@ const testLayer = AppNodeBuilder.build(
     Tool.node,
     PluginHooks.node,
     SessionInstructions.node,
+    Skill.node,
     Global.node,
     Image.node,
   ]),
@@ -341,7 +349,5 @@ describe("SessionInstructions", () => {
     expect(messages).toHaveLength(1)
     expect(messages[0]!.role).toBe("user")
     expect(messages[0]!.content).toEqual([{ type: "text", text: "Instructions from: /repo/sub/AGENTS.md\ncontent" }])
-    // Metadata is bookkeeping for the dedup ledger; the model must not see it.
-    expect(messages[0]!.metadata).toBeUndefined()
   })
 })

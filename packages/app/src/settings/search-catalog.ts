@@ -17,6 +17,12 @@ type Entry<Tab> = {
 
 export const clientSettings: Entry<SettingsRootTab>[] = [
   { tab: "general", label: "settings.tab.preferences" },
+  {
+    tab: "general",
+    label: "settings.helpFeedback",
+    target: "settings-help-feedback",
+    keywords: "support report issue",
+  },
   { tab: "appearance", label: "settings.general.section.appearance" },
   { tab: "notifications", label: "settings.tab.notifications" },
   { tab: "shortcuts", label: "settings.shortcuts.title", keywords: "keybind keyboard hotkey" },
@@ -53,6 +59,13 @@ export const clientSettings: Entry<SettingsRootTab>[] = [
     tab: "general",
     label: "settings.general.row.pinchZoom.title",
     target: "settings-pinch-zoom",
+    available: "desktop",
+  },
+  {
+    tab: "general",
+    label: "settings.general.row.spellcheck.title",
+    target: "settings-spellcheck",
+    keywords: "spelling spell check dictionary",
     available: "desktop",
   },
   {
@@ -106,17 +119,31 @@ export const clientSettings: Entry<SettingsRootTab>[] = [
   },
   {
     tab: "experimental",
-    label: "settings.experimental.row.newModelPicker.title",
-    target: "settings-new-model-picker",
-    description: "settings.experimental.row.newModelPicker.description",
-    keywords: "model picker selector switcher redesign",
-  },
-  {
-    tab: "experimental",
     label: "settings.experimental.row.foldUserMessages.title",
     target: "settings-fold-user-messages",
     description: "settings.experimental.row.foldUserMessages.description",
     keywords: "fold collapse long messages prompts read more",
+  },
+  {
+    tab: "experimental",
+    label: "settings.experimental.row.newTimeline.title",
+    target: "settings-new-timeline",
+    description: "settings.experimental.row.newTimeline.description",
+    keywords: "new timeline redesign activity explored edited ran grouping status",
+  },
+  {
+    tab: "experimental",
+    label: "settings.experimental.row.newQuestionUI.title",
+    target: "settings-new-question-ui",
+    description: "settings.experimental.row.newQuestionUI.description",
+    keywords: "question answers keyboard dock redesign",
+  },
+  {
+    tab: "experimental",
+    label: "settings.experimental.row.sidebarOrganize.title",
+    target: "settings-sidebar-organize",
+    description: "settings.experimental.row.sidebarOrganize.description",
+    keywords: "vertical side tabs projects recents organize sidebar",
   },
   {
     tab: "appearance",
@@ -174,6 +201,14 @@ export const clientSettings: Entry<SettingsRootTab>[] = [
   },
   {
     tab: "notifications",
+    label: "settings.general.notifications.questions.title",
+    target: "settings-notifications-questions",
+    section: "settings.general.section.notifications",
+    description: "settings.general.notifications.questions.description",
+    keywords: "desktop notifications questions mcp elicitation input",
+  },
+  {
+    tab: "notifications",
     label: "settings.general.notifications.errors.title",
     target: "settings-notifications-errors",
     section: "settings.general.section.notifications",
@@ -195,6 +230,14 @@ export const clientSettings: Entry<SettingsRootTab>[] = [
     section: "settings.general.section.sounds",
     description: "settings.general.sounds.permissions.description",
     keywords: "sound audio permissions",
+  },
+  {
+    tab: "notifications",
+    label: "settings.general.sounds.questions.title",
+    target: "settings-sounds-questions",
+    section: "settings.general.section.sounds",
+    description: "settings.general.sounds.questions.description",
+    keywords: "sound audio questions mcp elicitation input",
   },
   {
     tab: "notifications",

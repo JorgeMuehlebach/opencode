@@ -16,13 +16,24 @@ const windows = process.platform === "win32" ? it.live : it.live.skip
 const unix = process.platform === "win32" ? it.live.skip : it.live
 
 const installs = [
-  { method: "npm", command: ["npm", "install", "--global", "--force", "@opencode/cli@2.3.4-beta.1"] },
+  {
+    method: "npm",
+    command: (prefixArgs: string[]) => [
+      "npm",
+      "install",
+      "--global",
+      ...prefixArgs,
+      "--allow-scripts=@opencode/cli",
+      "--force",
+      "@opencode/cli@2.3.4-beta.1",
+    ],
+  },
   {
     method: "pnpm",
-    command: ["pnpm", "add", "--global", "--allow-build=@opencode/cli", "@opencode/cli@2.3.4-beta.1"],
+    command: () => ["pnpm", "add", "--global", "--allow-build=@opencode/cli", "@opencode/cli@2.3.4-beta.1"],
   },
-  { method: "yarn", command: ["yarn", "global", "add", "@opencode/cli@2.3.4-beta.1"] },
-  { method: "vp", command: ["vp", "update", "-g", "@opencode/cli@2.3.4-beta.1"] },
+  { method: "yarn", command: () => ["yarn", "global", "add", "@opencode/cli@2.3.4-beta.1"] },
+  { method: "vp", command: () => ["vp", "update", "-g", "@opencode/cli@2.3.4-beta.1"] },
 ] as const
 
 installs.forEach(({ method, command }) => {
@@ -30,7 +41,138 @@ installs.forEach(({ method, command }) => {
     Effect.gen(function* () {
       const test = yield* fixture()
       yield* test.updater.upgrade(method, "v2.3.4-beta.1")
-      expect(test.commands).toEqual([[...command]])
+      expect(test.commands).toEqual([command(test.prefixArgs)])
+    }),
+  )
+})
+
+// Installs a 2.2.7 package at <root>/<directory>, optionally with an npm in <root>/bin.
+const installed = (directory: string[], npm = false) =>
+  fixture(
+    () => ({}),
+    "@opencode/cli",
+    false,
+    "@opencode/cli",
+    undefined,
+    (root) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem
+        const pkg = path.join(root, ...directory)
+        yield* fs.makeDirectory(pkg, { recursive: true })
+        yield* fs.writeFileString(
+          path.join(pkg, "package.json"),
+          JSON.stringify({ name: "@opencode/cli", version: "2.2.7", bin: { opencode: "bin/opencode" } }),
+        )
+        if (npm) {
+          yield* fs.makeDirectory(path.join(root, "bin"), { recursive: true })
+          yield* fs.writeFileString(path.join(root, "bin", "npm"), "npm")
+        }
+        return path.join(pkg, "bin", "opencode")
+      }),
+  )
+const npmGlobal = ["lib", "node_modules", "@opencode", "cli"]
+
+// Version managers such as fnm give each Node install its own prefix, while the npm on PATH may belong to another one.
+unix("npm runs from the prefix that owns the running binary with that prefix's node first on PATH", () =>
+  Effect.gen(function* () {
+    const test = yield* installed(npmGlobal, true)
+    const npm = path.join(test.prefix, "bin", "npm")
+    yield* test.updater.method()
+    yield* test.updater.upgrade("npm", "2.2.7")
+    const removal = test.updater.removal("npm")
+    if (!removal) return yield* Effect.die("Expected npm removal command")
+    yield* removal.run
+    expect(test.commands[0]).toEqual([npm, "list", "-g", "--depth=0", "--prefix", test.prefix, "@opencode/cli"])
+    expect(test.commands.slice(5).map((command) => command.slice(0, 5))).toEqual([
+      [npm, "install", "--global", "--prefix", test.prefix],
+      [npm, "uninstall", "--global", "--prefix", test.prefix],
+    ])
+    const first = path.join(test.prefix, "bin") + path.delimiter
+    expect(test.paths.map((value) => value?.startsWith(first) ?? false)).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+    ])
+  }),
+)
+
+unix("npm only derives a prefix when the running package is that prefix's global package", () =>
+  Effect.gen(function* () {
+    const test = yield* installed(["lib", "node_modules", "wrapper", "node_modules", "@opencode", "cli"], true)
+    yield* test.updater.method()
+    expect(test.commands[0]).toEqual(["npm", "list", "-g", "--depth=0", "@opencode/cli"])
+    expect(test.paths[0]).toBeUndefined()
+  }),
+)
+
+it.live("npm upgrades fail when the running copy keeps its old version", () =>
+  Effect.gen(function* () {
+    const test = yield* installed(npmGlobal)
+    const error = yield* test.updater.upgrade("npm", "2.3.4").pipe(Effect.flip)
+    expect(test.commands).toHaveLength(1)
+    expect(error).toBeInstanceOf(Updater.UpgradeError)
+    expect(error.message).toBe(
+      `npm reported success, but ${yield* test.fs.realPath(test.executable)} is still version 2.2.7.`,
+    )
+  }),
+)
+
+const managers = [
+  {
+    name: "Volta",
+    label: "~/.volta",
+    directory: [".volta", "tools", "image", "packages", "@opencode", "cli", ...npmGlobal],
+    command: "volta install @opencode/cli",
+  },
+  {
+    name: "Volta",
+    label: "custom VOLTA_HOME",
+    directory: ["volta-home", "tools", "image", "packages", "@opencode", "cli", ...npmGlobal],
+    command: "volta install @opencode/cli",
+  },
+  {
+    name: "mise",
+    label: "mise npm backend",
+    directory: ["mise", "installs", "npm-opencode-cli", "2.2.7", ...npmGlobal],
+    command: "mise use -g npm:@opencode/cli",
+  },
+] as const
+
+managers.forEach((manager) => {
+  it.live(`${manager.label} installs print the ${manager.name} command instead of updating in place`, () =>
+    Effect.gen(function* () {
+      const test = yield* installed([...manager.directory], true)
+      expect(yield* test.updater.method()).toBeUndefined()
+      const latest = yield* test.updater.managed()
+      const pinned = yield* test.updater.managed("v2.2.6")
+      expect(latest?.title).toBe(`OpenCode is managed by ${manager.name}`)
+      expect(latest?.command).toBe(`${manager.command}@2.3.4`)
+      expect(pinned?.command).toBe(`${manager.command}@2.2.6`)
+      const applied = yield* test.updater.apply("2.3.4").pipe(Effect.flip)
+      expect(applied.message).toBe(`OpenCode is managed by ${manager.name}. Update it with ${manager.command}@2.3.4`)
+      // An explicit --method keeps its existing command, and the version check reports the untouched copy.
+      const explicit = yield* test.updater.upgrade("npm", "2.3.4").pipe(Effect.flip)
+      expect(explicit.message).toContain("is still version 2.2.7")
+      expect(test.commands).toEqual([
+        ["npm", "install", "--global", "--allow-scripts=@opencode/cli", "--force", "@opencode/cli@2.3.4"],
+      ])
+    }),
+  )
+})
+;[
+  ["mise", "installs", "node", "24.22.2"],
+  [".volta", "tools", "image", "node", "22.23.4"],
+].forEach((node) => {
+  it.live(`npm globals under ${node.slice(0, 3).join("/")} stay npm installs`, () =>
+    Effect.gen(function* () {
+      const test = yield* installed([...node, ...npmGlobal])
+      expect(yield* test.updater.managed()).toBeUndefined()
+      yield* test.updater.method()
+      expect(test.commands).toHaveLength(5)
     }),
   )
 })
@@ -156,7 +298,7 @@ it.live("install failures expose stderr and process errors do not report success
       }))
       expect(yield* test.updater.method()).toBe(method)
       expect(test.commands).toEqual([
-        ["npm", "list", "-g", "--depth=0", "@opencode/cli"],
+        ["npm", "list", "-g", "--depth=0", ...test.prefixArgs, "@opencode/cli"],
         ["pnpm", "list", "-g", "--depth=0", "@opencode/cli"],
         ["bun", "pm", "ls", "-g"],
         ["yarn", "global", "list"],
@@ -463,12 +605,19 @@ if (typeof OPENCODE_CLI_NAME === "string" && OPENCODE_CLI_NAME === "opencode2-no
       yield* test.updater.upgrade("pnpm", "v2.3.4")
       yield* test.updater.upgrade("vp", "v2.3.4")
       expect(test.commands).toEqual([
-        ["npm", "list", "-g", "--depth=0", "@opencode/cli-node"],
+        ["npm", "list", "-g", "--depth=0", ...test.prefixArgs, "@opencode/cli-node"],
         ["pnpm", "list", "-g", "--depth=0", "@opencode/cli-node"],
         ["bun", "pm", "ls", "-g"],
         ["yarn", "global", "list"],
         ["vp", "list", "-g", "--json", "@opencode/cli-node"],
-        ["npm", "install", "--global", "@opencode/cli-node@2.3.4"],
+        [
+          "npm",
+          "install",
+          "--global",
+          ...test.prefixArgs,
+          "--allow-scripts=@opencode/cli-node",
+          "@opencode/cli-node@2.3.4",
+        ],
         ["pnpm", "add", "--global", "--allow-build=@opencode/cli-node", "@opencode/cli-node@2.3.4"],
         ["vp", "update", "-g", "@opencode/cli-node@2.3.4"],
       ])
