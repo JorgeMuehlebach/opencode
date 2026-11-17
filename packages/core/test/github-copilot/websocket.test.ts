@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { LLM, Message } from "@opencode/ai/effect"
+import { ai, Message } from "@opencode/ai/effect"
 import { LLMClient, RequestExecutor } from "@opencode/ai/route"
 import { AISDK } from "@opencode/core/aisdk"
 import { Credential } from "@opencode/core/credential"
@@ -11,6 +11,7 @@ import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { GithubCopilotPlugin } from "@opencode/core/plugin/provider/github-copilot"
 import { Effect, Layer, Schema, Struct } from "effect"
+import { HttpClient } from "effect/http"
 import { testEffect } from "../lib/effect"
 import { makeWebSocketServer } from "../lib/websocket-server"
 import { PluginTestLayer } from "../plugin/fixture"
@@ -78,17 +79,19 @@ describe("Copilot catalog to SDK WebSocket bridge", () => {
           },
         })
         const baseURL = server.url.replace(/^ws/, "http").replace(/\/responses$/, "")
-        const models = yield* Effect.promise(() => CopilotModels.get(baseURL, {}, []))
+        const httpClient = yield* HttpClient.HttpClient
+        const models = yield* CopilotModels.get(httpClient, baseURL, {}, [])
         const info = models.get(Model.ID.make("gpt-6.1-sol"))
         if (!info) throw new Error("Expected advertised Copilot model")
         const plugin = yield* Plugin.Service
-        const host = yield* PluginHost.make(plugin)
+        const host = yield* PluginHost.make(plugin, "test")
         yield* GithubCopilotPlugin.effect(host)
         const aisdk = yield* AISDK.Service
         const model = yield* ModelResolver.fromCatalogModel(
           // No cached WebSocket capability flag: the policy still applies if discovery was unavailable.
           {
             ...info,
+            headers: { ...info.headers, "Copilot-Session-Token": "fixture-auto-token" },
             settings: {
               ...(mode === "https-only" ? info.settings : Struct.omit(info.settings ?? {}, ["websocket"])),
               ...(mode === "http" ? { transport: "http" } : {}),
@@ -105,8 +108,8 @@ describe("Copilot catalog to SDK WebSocket bridge", () => {
         )
         const llm = yield* LLMClient.Service
         if (mode === "rejected") {
-          const first = yield* llm.generate(LLM.request({ model, prompt: "First" })).pipe(Effect.flip)
-          const second = yield* llm.generate(LLM.request({ model, prompt: "Second" })).pipe(Effect.flip)
+          const first = yield* llm.generate(ai.request({ model, prompt: "First" })).pipe(Effect.flip)
+          const second = yield* llm.generate(ai.request({ model, prompt: "Second" })).pipe(Effect.flip)
           expect(first.message).toContain("WebSocket")
           expect(second.message).toContain("WebSocket")
           expect(httpHeaders).toHaveLength(0)
@@ -114,9 +117,9 @@ describe("Copilot catalog to SDK WebSocket bridge", () => {
           expect(server.state.headers.filter((headers) => headers.upgrade === "websocket")).toHaveLength(2)
           return
         }
-        const first = yield* llm.generate(LLM.request({ model, prompt: "First" }))
+        const first = yield* llm.generate(ai.request({ model, prompt: "First" }))
         const second = yield* llm.generate(
-          LLM.request({ model, messages: [Message.user("First"), first.message, Message.user("Second")] }),
+          ai.request({ model, messages: [Message.user("First"), first.message, Message.user("Second")] }),
         )
         expect(first.text).toBe("Reply 1")
         expect(second.text).toBe("Reply 2")
@@ -126,6 +129,7 @@ describe("Copilot catalog to SDK WebSocket bridge", () => {
           expect(handshakes).toHaveLength(2)
           expect(handshakes.every((headers) => headers.authorization === "Bearer fixture-copilot-token")).toBe(true)
           expect(handshakes[0]?.["x-github-api-version"]).toBe("2026-08-01")
+          expect(handshakes[0]?.["copilot-session-token"]).toBe("fixture-auto-token")
           expect(server.state.opens).toBe(2)
           expect(httpHeaders).toHaveLength(0)
           expect(bodies[1]).toMatchObject({ type: "response.create", initiator: "user", store: false })

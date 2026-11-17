@@ -25,21 +25,15 @@ interface CheckpointValue {
  */
 export type Shape = (request: Readonly<Record<string, unknown>>) => Readonly<Record<string, unknown>> | undefined
 
-export interface BaseDriver extends WebSocketChannelDriver {
-  readonly observeEvent?: (
-    create: ChannelCreate,
-    frame: string,
-    event: OpenResponses.Event,
-  ) => Effect.Effect<ChannelObservation, AIError>
-}
-
 export interface DriverInput {
   readonly id: string
   readonly name: string
   readonly request: Readonly<Record<string, unknown>>
-  readonly message: string
-  readonly transform?: (request: Readonly<Record<string, unknown>>) => Readonly<Record<string, unknown>>
-  readonly base: BaseDriver
+  readonly base: (
+    create: ChannelCreate,
+    frame: string,
+    event: OpenResponses.Event,
+  ) => Effect.Effect<ChannelObservation, AIError>
   readonly continuation?: Shape
 }
 
@@ -162,10 +156,9 @@ export const driver = (input: DriverInput): WebSocketChannelDriver => {
         const fields = previous ? shape(request) : undefined
         const delta = previous && fields ? incremental(request, previous) : undefined
         if (!previous || !fields || !delta)
-          return { message: ProviderShared.encodeJson(input.transform?.(request) ?? request), mode: "full" as const }
-        const next = { ...fields, input: delta, previous_response_id: previous.responseID }
+          return { message: ProviderShared.encodeJson(request), mode: "full" as const }
         return {
-          message: ProviderShared.encodeJson(input.transform?.(next) ?? next),
+          message: ProviderShared.encodeJson({ ...fields, input: delta, previous_response_id: previous.responseID }),
           mode: "incremental" as const,
         }
       }),
@@ -176,9 +169,7 @@ export const driver = (input: DriverInput): WebSocketChannelDriver => {
             ProviderShared.eventError(input.id, `Invalid ${input.name} WebSocket event`, frame, cause),
           ),
         )
-        const observation = yield* input.base.observeEvent
-          ? input.base.observeEvent(create, frame, event)
-          : input.base.observe(create, frame)
+        const observation = yield* input.base(create, frame, event)
         if (event.type === "response.output_item.done" && event.item) {
           output.push(event.item)
           if (event.output_index !== undefined) indexedOutput[event.output_index] = event.item

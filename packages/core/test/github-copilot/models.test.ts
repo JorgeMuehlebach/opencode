@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test"
 import { CopilotModels } from "@opencode/core/github-copilot/models"
+import { Effect } from "effect"
+import { FetchHttpClient, HttpClient } from "effect/http"
 import { Model } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
+
+const run = <A, E>(effect: (http: HttpClient.HttpClient) => Effect.Effect<A, E>) =>
+  Effect.runPromise(HttpClient.HttpClient.pipe(Effect.flatMap(effect), Effect.provide(FetchHttpClient.layer)))
 
 test("defensively syncs advertised Copilot models", async () => {
   const server = Bun.serve({
@@ -93,12 +98,12 @@ test("defensively syncs advertised Copilot models", async () => {
       ...Model.Info.default(Provider.ID.githubCopilot, Model.ID.make("stale")),
       modelID: Model.ID.make("stale"),
     })
-    const models = await CopilotModels.get(server.url.origin, {}, [existing, stale])
+    const models = await run((http) => CopilotModels.get(http, server.url.origin, {}, [existing, stale]))
     const model = models.get(Model.ID.make("gpt-5"))
 
     expect(model?.name).toBe("GPT-5 local")
     expect(model?.package).toBe(Provider.aisdk("@ai-sdk/github-copilot"))
-    expect(model?.settings).toMatchObject({ baseURL: server.url.origin, endpoint: "responses" })
+    expect(model?.settings).toEqual({ baseURL: server.url.origin, endpoint: "responses", websocket: false })
     expect(model?.cost[0]).toMatchObject({ input: 0, output: 0, cache: { read: 0, write: 0 } })
     expect(model?.variants.map((variant) => variant.id)).toEqual([
       Model.VariantID.make("low"),
@@ -106,10 +111,7 @@ test("defensively syncs advertised Copilot models", async () => {
     ])
     expect(model?.capabilities.input).toEqual(["text", "image", "pdf"])
     expect(models.get(Model.ID.make("claude-sonnet"))?.package).toBe("@opencode/ai/providers/anthropic")
-    expect(models.get(Model.ID.make("claude-sonnet"))?.settings).toMatchObject({
-      baseURL: `${server.url.origin}/v1`,
-      endpoint: "messages",
-    })
+    expect(models.get(Model.ID.make("claude-sonnet"))?.settings).toEqual({ baseURL: `${server.url.origin}/v1` })
     expect(models.get(Model.ID.make("vision-only"))?.capabilities.input).toEqual(["text", "image"])
     expect(models.get(Model.ID.make("utility"))?.enabled).toBe(false)
     expect(models.has(Model.ID.make("stale"))).toBe(false)
@@ -147,7 +149,7 @@ test("prices cache reads from either token price spelling", async () => {
   })
 
   try {
-    const models = await CopilotModels.get(server.url.origin, {}, [])
+    const models = await run((http) => CopilotModels.get(http, server.url.origin, {}, []))
     expect(models.get(Model.ID.make("renamed"))?.cost[0]).toMatchObject({
       input: 2.5,
       output: 15,
@@ -215,7 +217,9 @@ test("uses the Copilot SDK bridge for advertised WebSocket Responses models", as
       modelID: Model.ID.make("gpt-http"),
       settings: { websocket: true },
     })
-    const models = await CopilotModels.get(server.url.origin, {}, [alias, disabled, http, forced])
+    const models = await run((httpClient) =>
+      CopilotModels.get(httpClient, server.url.origin, {}, [alias, disabled, http, forced]),
+    )
     for (const id of ["gpt-6-luna", "gpt-6.1-sol", "my-luna"]) {
       expect(models.get(Model.ID.make(id))).toMatchObject({
         package: Provider.aisdk("@ai-sdk/github-copilot"),
@@ -249,7 +253,7 @@ test("uses the Copilot SDK bridge for advertised WebSocket Responses models", as
     for (const id of ["claude-sonnet", "claude-messages"]) {
       expect(models.get(Model.ID.make(id))).toMatchObject({
         package: "@opencode/ai/providers/anthropic",
-        settings: { baseURL: `${server.url.origin}/v1`, endpoint: "messages" },
+        settings: { baseURL: `${server.url.origin}/v1` },
       })
       expect(models.get(Model.ID.make(id))?.settings?.websocket).toBeUndefined()
     }
